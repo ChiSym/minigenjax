@@ -1,7 +1,7 @@
 # %%
 import jax
 import jax.numpy as jnp
-from minigenjax import *
+from .minigenjax import *
 
 
 @Gen
@@ -55,19 +55,19 @@ def test_uniform_model():
 def test_model_vmap():
     tr = jax.vmap(model(50.0).simulate)(jax.random.split(key0, 5))
     assert jnp.allclose(
-        tr["retval"], jnp.array([75.802376, 76.80465, 75.80292, 75.735016, 74.83815])
+        tr["retval"], jnp.array([75.292915, 76.52893 , 75.79739 , 76.22211 , 76.13692])
     )
     assert jnp.allclose(
         tr["subtraces"]["a"]["subtraces"]["x"]["retval"],
-        jnp.array([50.054485, 50.0491, 49.935482, 49.989834, 49.770393]),
+        jnp.array([49.96525 , 50.06475 , 50.01337 , 50.10502 , 50.147545]),
     )
     assert jnp.allclose(
         tr["subtraces"]["b"]["subtraces"]["x"]["retval"],
-        jnp.array([25.747892, 26.755548, 25.867435, 25.745186, 25.067755]),
+        jnp.array([25.327665, 26.464176, 25.784023, 26.117092, 25.989374 ]),
     )
     assert jnp.allclose(
         tr["subtraces"]["a"]["subtraces"]["x"]["score"],
-        jnp.array([1.23521, 1.2631074, 1.175523, 1.3784798, -1.2523485]),
+        jnp.array([1.3232566 , 1.174024  , 1.3747091 , 0.83221716, 0.29519486]),
     )
     assert jnp.allclose(
         tr["subtraces"]["b"]["subtraces"]["x"]["score"],
@@ -142,11 +142,15 @@ def test_distribution_as_sampler():
 
 def test_cond_model():
     b = 100.0
+    tr = model1(b).simulate(key0)
+    assert jnp.allclose(tr['retval'], jnp.array(99.87485))
+    tr = model2(b/2).simulate(key0)
+    assert jnp.allclose(tr['retval'], jnp.array(50.21074))
     c = Cond(model1(b), model2(b / 2.0))
     tr = c(0).simulate(key0)
-    assert jnp.allclose(tr["retval"], jnp.array(51.74507))
+    assert jnp.allclose(tr["retval"], jnp.array(51.86012))
     tr = c(1).simulate(key0)
-    assert jnp.allclose(tr["retval"], jnp.array(100.113846))
+    assert jnp.allclose(tr["retval"], jnp.array(100.14762))
 
     @Gen
     def cond_model(b):
@@ -155,7 +159,7 @@ def test_cond_model():
 
     tr = cond_model(b).simulate(key0)
     assert jnp.allclose(
-        tr["subtraces"]["c"]["subtraces"]["x"]["retval"], jnp.array(100.138466)
+        tr["subtraces"]["c"]["subtraces"]["x"]["retval"], jnp.array(99.93263)
     )
     assert jnp.allclose(tr["subtraces"]["flip"]["retval"], jnp.array(1))
 
@@ -170,12 +174,12 @@ def test_vmap_over_cond():
     tr = jax.vmap(cond_model(100.0).simulate)(jax.random.split(key0, 5))
 
     assert jnp.allclose(
-        tr["retval"], jnp.array([100.21688, 100.03083, 50.535404, 51.259216, 99.95892])
+        tr["retval"], jnp.array([ 99.92747 ,  51.95208 ,  51.732613,  50.974968, 100.126045])
     )
-    assert jnp.allclose(tr["subtraces"]["flip"]["retval"], jnp.array([1, 1, 0, 0, 1]))
+    assert jnp.allclose(tr["subtraces"]["flip"]["retval"], jnp.array([1, 0, 0, 0, 1]))
     assert jnp.allclose(
         tr["subtraces"]["s"]["retval"],
-        jnp.array([100.21688, 100.03083, 50.535404, 51.259216, 99.95892]),
+        jnp.array([ 99.92747 ,  51.95208 ,  51.732613,  50.974968, 100.126045]),
     )
 
 

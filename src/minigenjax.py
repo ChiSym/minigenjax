@@ -1,18 +1,16 @@
 # %%
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 import tensorflow_probability.substrates.jax as tfp
 import jax
 import jax.tree
 import jax.numpy as jnp
 from jax.interpreters import batching, mlir
+import jax.extend.linear_util as lu
 import jax.core
 from jaxtyping import PRNGKeyArray
 
 # %%
-KEY_TYPE = jax.core.ShapedArray((2,), jnp.uint32)
-SCORE_TYPE = jax.core.ShapedArray((), jnp.float32)
 PHANTOM_KEY = jax.random.key(987654321)
-SCALAR_STRUCTURE = jax.tree.structure({"retval": 0})
 
 
 class GenPrimitive(jax.core.Primitive):
@@ -42,15 +40,6 @@ class GenPrimitive(jax.core.Primitive):
         )
         return result, batched_axes
 
-    def __call__(self, *args):
-        this = self
-
-        class Binder:
-            def __matmul__(self, address: str):
-                return this.bind(PHANTOM_KEY, *args, at=address)
-
-        return Binder()
-
 
 class Distribution(GenPrimitive):
     def __init__(self, name, tfd_ctor):
@@ -67,37 +56,67 @@ class Distribution(GenPrimitive):
             case "Score":
                 return self.tfd_ctor(*args[1:]).log_prob(args[0])
             case _:
-                raise NotImplementedError(f'{self.name}.{kwargs['op']}')
+                raise NotImplementedError(f'{self.name}.{kwargs["op"]}')
 
     def simulate_p(self, sub_key: PRNGKeyArray, arg_tuple: tuple):
-        print(f"distribution simulate_p sub_key {sub_key} arg_tuple {arg_tuple}")
         v = self.bind(sub_key, *arg_tuple[1:], op="Sample")
         return {"retval": v, "score": self.bind(v, *arg_tuple[1:], op="Score")}
 
+    def __call__(self, *args):
+        this = self
+
+        class Binder:
+            def __matmul__(self, address: str):
+                return this.bind(PHANTOM_KEY, *args, at=address)
+
+            def __call__(self, key: PRNGKeyArray):
+                return this.tfd_ctor(*args).sample(seed=key)
+
+        return Binder()
+
 
 Normal = Distribution("Normal", tfp.distributions.Normal)
+MvNormalDiag = Distribution("MvNormalDiag", tfp.distributions.MultivariateNormalDiag)
 Uniform = Distribution("Uniform", tfp.distributions.Uniform)
 Flip = Distribution("Bernoulli", lambda p: tfp.distributions.Bernoulli(probs=p))
+# MvNormalDiag = Distribution("MvNormalDiag", tfp.distributions.MultivariateNormalDiag)
+# bug with numpy 2.0
+Categorical = Distribution(
+    "Categorical", lambda ls: tfp.distributions.Categorical(logits=ls)
+)
 
 
 class KeySplitP(jax.core.Primitive):
+    KEY_TYPE = jax.core.ShapedArray((2,), jnp.uint32)
+
     def __init__(self):
         super().__init__("KeySplit")
-        self.def_impl(lambda k: jax.random.split(k, 2))
+        def debug_impl(k, a=None):
+            print(f'ks debug impl {k}')
+            rval = jax.random.split(k, 2)
+            print(f'rval {rval}')
+            print(f'rval[0] {rval[0]}, rval[1] {rval[1]}')
+            return rval[0], rval[1]
+
+        #self.def_impl(lambda k, a=None: jax.random.split(k, 2))
+        self.def_impl(debug_impl)
         self.multiple_results = True
-        self.def_abstract_eval(lambda _: [KEY_TYPE, KEY_TYPE])
+        self.def_abstract_eval(lambda _, a=None: [self.KEY_TYPE, self.KEY_TYPE])
 
         mlir.register_lowering(self, mlir.lower_fun(self.impl, self.multiple_results))
 
         batching.primitive_batchers[self] = self.batch
 
-    def batch(self, vector_args, batch_axes):
-        key_pair_vector = jax.vmap(self.impl, in_axes=batch_axes)(*vector_args)
+    def batch(self, vector_args, batch_axes, a=None):
+        #key_pair_vector = jax.vmap(self.impl, in_axes=batch_axes)(*vector_args)
+        v0, v1 = jax.vmap(self.impl, in_axes=batch_axes)(*vector_args)
+        print(f'batch returning v0 {v0}, v1 {v1}')
         # Transpose key_pair_vector into a pair of key vectors
-        return [key_pair_vector[:, :, 0], key_pair_vector[:, :, 1]], (
-            batch_axes[0],
-            batch_axes[0],
-        )
+        # return [key_pair_vector[:, :, 0], key_pair_vector[:, :, 1]], (
+        #     batch_axes[0],
+        #     batch_axes[0],
+        # )
+        return [v0, v1], (batch_axes[0], batch_axes[0])
 
 
 KeySplit = KeySplitP()
@@ -105,20 +124,21 @@ GenSymT = Callable[[jax.core.AbstractValue], jax.core.Var]
 
 
 # %%
-class Gen:
-    def __init__(self, f: Callable[..., Any]):
+class Gen[R]:
+    def __init__(self, f: Callable[..., R]):
         self.f = f
 
-    def __call__(self, *args) -> "GF":
+    def __call__(self, *args) -> "GF[R]":
         return GF(self.f, args)
 
 
-class GF(GenPrimitive):
-    def __init__(self, f: Callable[..., Any], args: tuple):
+class GF[R](GenPrimitive):
+    def __init__(self, f: Callable[..., R], args: tuple):
         super().__init__(f"GF[{f.__name__}]")
         self.f = f
         self.args = args
-        self.jaxpr = jax.make_jaxpr(f)(*args)
+        self.jaxpr, self.shape = jax.make_jaxpr(f, return_shape=True)(*args)
+        self.multiple_results = isinstance(self.shape, tuple)
         a_vals = [ov.aval for ov in self.jaxpr.jaxpr.outvars]
         self.abstract_value = a_vals if self.multiple_results else a_vals[0]
 
@@ -130,51 +150,32 @@ class GF(GenPrimitive):
         return v if self.multiple_results else v[0]
 
     # TODO: see if we can unify these two: if we're given any args, use them, else use the stored args?
-    def simulate(self, key: PRNGKeyArray):
-        return Simulate.run_gf(self, key, *self.args)
+    def simulate(self, key: PRNGKeyArray) -> dict:
+        return Simulate(key).run(self.jaxpr, self.args)
 
-    def simulate_p(self, sub_key: PRNGKeyArray, arg_tuple: tuple):
-        return Simulate.run(self.jaxpr, sub_key, arg_tuple)
+    def simulate_p(self, sub_key: PRNGKeyArray, arg_tuple: tuple) -> dict:
+        return Simulate(sub_key).run(self.jaxpr, arg_tuple)
 
     def __matmul__(self, address: str):
-        print(f"GF bind {self.f} {self.args} @ {address}")
         return self.bind(*self.args, at=address)
 
 
 # %%
-key0 = jax.random.PRNGKey(0)
 
 
-@Gen
-def model1(b):
-    y = Normal(b, 0.1) @ "x"
-    return y
 
 
-@Gen
-def model2(b):
-    return Uniform(b, b + 2.0) @ "x"
 
 
-@Gen
-def model(x):
-    a = model1(x) @ "a"
-    b = model2(x / 2.0) @ "b"
-    return a + b
+class Transformation[R]:
+    def __init__(self):
+        pass
 
+    def handle_eqn(self, eqn, params, bind_params):
+        return eqn.primitive.bind(*params, **bind_params)
 
-# %%
-class Simulate:
-    score_gensym: GenSymT = jax.core.gensym("_score")
-
-    @staticmethod
-    def run_gf(gf: GF, key: PRNGKeyArray, *args):
-        return Simulate.run(gf.jaxpr, key, args)
-
-    @staticmethod
-    def run(closed_jaxpr: jax.core.ClosedJaxpr, key: PRNGKeyArray, arg_tuple):
+    def run(self, closed_jaxpr: jax.core.ClosedJaxpr, arg_tuple):
         jaxpr = closed_jaxpr.jaxpr
-        trace = {}
         env: dict[jax.core.Var, Any] = {}
 
         def read(v: jax.core.Atom) -> Any:
@@ -186,176 +187,263 @@ class Simulate:
             env[v] = val
 
         jax.util.safe_map(write, jaxpr.constvars, closed_jaxpr.consts)
-        print(f"invars {jaxpr.invars} arg_tuple {arg_tuple}")
         jax.util.safe_map(write, jaxpr.invars, arg_tuple)
 
         for eqn in jaxpr.eqns:
             subfuns, bind_params = eqn.primitive.get_bind_params(eqn.params)
+            if subfuns:
+                raise NotImplementedError("nonempty subfuns")
             # name_stack = source_info_util.current_name_stack() + eqn.source_info.name_stack
             # traceback = eqn.source_info.traceback if propagate_source_info else None
             # with source_info_util.user_context(
             #    traceback, name_stack=name_stack), eqn.ctx.manager:
             params = tuple(jax.util.safe_map(read, eqn.invars))
-            if isinstance(eqn.primitive, GenPrimitive):
-                key, sub_key = KeySplit.bind(key)
-                print(
-                    f"GF eqn {eqn.primitive}{(sub_key,) + params} (bp {bind_params}) (sf {subfuns})"
-                )
-                ans = eqn.primitive.simulate_p(sub_key, params)
-                # ans = Simulate.run_gf(eqn.primitive, sub_key, *params)
-                print(f"ans = {ans}")
-                trace[bind_params["at"]] = ans
-                ans = ans["retval"]
-            elif eqn.primitive is jax.lax.cond_p:
-                key, sub_key = KeySplit.bind(key)
-                branches = bind_params["branches"]
-
-                def simify(jaxpr):
-                    """Apply simulate to jaxpr and return the transformed jaxpr together
-                    with its return shape."""
-                    return jax.make_jaxpr(
-                        lambda key, *args: Simulate.run(jaxpr, key, *args),
-                        return_shape=True,
-                    )(sub_key, params[1:])
-
-                # simified is a list of pairs (jaxpr, shape)
-                simified = list(map(simify, branches))
-                simmed_branches = tuple(s[0] for s in simified)
-                shapes = [s[1] for s in simified]
-                ans = eqn.primitive.bind(
-                    *subfuns, params[0], sub_key, *params[1:], branches=simmed_branches
-                )
-
-                # tricky: we want to find the address at which the cond result should be traced,
-                # but this is inside the cond. If, in fact, both branches are GF invocations traced
-                # to the same address (the Cond combinator arranges for this), we will use that address.
-                def address_from_branch(b: jax.core.ClosedJaxpr):
-                    if len(b.jaxpr.eqns) == 1 and isinstance(
-                        b.jaxpr.eqns[0].primitive, GF
-                    ):
-                        return b.jaxpr.eqns[0].params.get("at")
-
-                branch_addresses = tuple(map(address_from_branch, branches))
-                if branch_addresses[0] and all(
-                    b == branch_addresses[0] for b in branch_addresses[1:]
-                ):
-                    address = branch_addresses[0]
-                    u = jax.tree.unflatten(jax.tree_structure(shapes[0]), ans)
-                    # flatten out an extra layer of subtraces
-                    trace[address] = u["subtraces"][address]
-                    ans = [u["retval"]]
-                print(f"cond outvars {eqn.outvars} {eqn.primitive.multiple_results}")
-            else:
-                ans = eqn.primitive.bind(*subfuns, *params, **bind_params)
+            ans = self.handle_eqn(eqn, params, bind_params)
             if eqn.primitive.multiple_results:
                 jax.util.safe_map(write, eqn.outvars, ans)
             else:
                 write(eqn.outvars[0], ans)
             # clean_up_dead_vars(eqn, env, lu)
         retvals = jax.util.safe_map(read, jaxpr.outvars)
+        retval = retvals if len(jaxpr.outvars) > 1 else retvals[0]
+        self.cleanup_state()
+        return self.construct_retval(retval)
 
+    def construct_retval(self, retval) -> R:
+        return retval
+
+    def cleanup_state(self):
+        pass
+
+
+class Simulate(Transformation[dict]):
+    S_KEY = jax.random.PRNGKey(99999)
+    def __init__(self, key: PRNGKeyArray):
+        self.key = key
+        self.trace = {}
+
+    def address_from_branch(self, b: jax.core.ClosedJaxpr):
+        """Look at the given JAXPR and find out if it is a single-instruction
+        call to a GF traced to an address. If so, return that address. This is
+        used to detect when certain JAX primitives (e.g., `scan_p`, `cond_p`)
+        have been applied directly to traced generative functions, in which case
+        the current transformation should be propagated to the jaxpr within."""
+        if len(b.jaxpr.eqns) == 1 and isinstance(b.jaxpr.eqns[0].primitive, GF):
+            return b.jaxpr.eqns[0].params.get("at")
+
+    def transform_inner(self, jaxpr, in_avals):
+        """Apply simulate to jaxpr and return the transformed jaxpr together
+        with its return shape."""
+        # TODO: this function feels sort of redundant here. Maybe there's a
+        # way to move it up a level.
+
+        key_aval = jax.core.ShapedArray((2,), jnp.uint32)
+
+        def inner(key: PRNGKeyArray, in_avals: tuple):
+            xf = Simulate(key)
+            retval = xf.run(jaxpr, in_avals)
+            xf.key = None
+            return retval
+
+        print(f'S_KEY {self.S_KEY}')
+        return jax.make_jaxpr(
+#            lambda key, arg_tuple: Simulate(key).run(jaxpr, arg_tuple),
+            inner,
+            return_shape=True,
+        )(self.S_KEY, in_avals)
+
+    def handle_eqn(self, eqn: jax.core.JaxprEqn, params, bind_params):
+        if isinstance(eqn.primitive, GenPrimitive):
+            print(f'point 1: ks.bind {self.key} {id(self.key)}')
+            self.key, sub_key = KeySplit.bind(self.key, a='gen_p')
+            print(f'p1 came out OK {self.key} {id(self.key)}')
+            ans = eqn.primitive.simulate_p(sub_key, params)
+            sub_key = None
+            self.trace[bind_params["at"]] = ans
+            return ans["retval"]
+
+        if eqn.primitive is jax.lax.cond_p:
+            print(f'point 2: ks.bind {self.key}')
+            self.key, sub_key = KeySplit.bind(self.key, a='cond_p')
+            print(f'p2 came out OK: {self.key}')
+            branches = bind_params["branches"]
+            avals = [v.aval for v in eqn.invars[1:]]
+
+            transformed = list(
+                map(
+                    lambda branch: self.transform_inner(branch, avals),
+                    branches,
+                )
+            )
+            transformed_branches = tuple(t[0] for t in transformed)
+            shapes = [s[1] for s in transformed]
+            new_bind_params = bind_params | {"branches": transformed_branches}
+            print(f'eqn.primitive.bind p0 {params[0]} sub_key {sub_key} p1s {params[1:]} nbp {new_bind_params}')
+            #with jax.checking_leaks():
+            ans = eqn.primitive.bind(params[0], sub_key, *params[1:], **new_bind_params)
+            sub_key = None
+            print(f'ans = {ans}')
+
+            branch_addresses = tuple(map(self.address_from_branch, branches))
+            if branch_addresses[0] and all(
+                b == branch_addresses[0] for b in branch_addresses[1:]
+            ):
+                address = branch_addresses[0]
+                u = jax.tree.unflatten(jax.tree.structure(shapes[0]), ans)
+                # flatten out an extra layer of subtraces
+                self.trace[address] = u["subtraces"][address]
+                ans = [u["retval"]]
+            return ans
+
+        if eqn.primitive is jax.lax.scan_p:
+            print(f'point 3: ks.bind {self.key}')
+            self.key, sub_key = KeySplit.bind(self.key, a='scan_p')
+            print(f'p3 came out OK {self.key}')
+            inner = bind_params["jaxpr"]
+            # at this point params contains (init, xs). We want to simify with
+            # (carry, x) i.e. (init, xs[0])
+            xs_aval = eqn.invars[1].aval
+            assert isinstance(xs_aval, jax.core.ShapedArray)
+            x_aval = xs_aval.update(shape=xs_aval.shape[1:])
+            scan_avals = [eqn.invars[0].aval, x_aval]
+            transformed_inner, shape = self.transform_inner(inner, scan_avals)
+            inner_jaxpr = transformed_inner.jaxpr
+            # simmed_inner is nice but in the scan context we need to return the
+            # new root key among the return values
+            transformed_inner = transformed_inner.replace(
+                jaxpr=inner_jaxpr.replace(
+                    outvars=inner_jaxpr.eqns[0].outvars[:1] + inner_jaxpr.outvars,
+                    debug_info=None,
+                )
+            )
+            new_bind_params = bind_params | {
+                "jaxpr": transformed_inner,
+                "linear": (False,) + bind_params["linear"],
+                "num_carry": bind_params["num_carry"] + 1,
+            }
+            ans = eqn.primitive.bind(sub_key, *params, **new_bind_params)
+            if address := self.address_from_branch(inner):
+                # drop returned key from the unflattening part
+                u = jax.tree.unflatten(jax.tree.structure(shape), ans[1:])
+                self.trace[address] = u["subtraces"][address]
+                ans = u["retval"]
+
+            return ans
+
+        return super().handle_eqn(eqn, params, bind_params)
+
+    def construct_retval(self, retval):
         return {
-            "retval": retvals if len(jaxpr.outvars) > 1 else retvals[0],
-            "subtraces": trace,
+            "retval": retval,
+            "subtraces": self.trace,
         }
+
+    def cleanup_state(self):
+        print(f'cleaning up state {self.key} {id(self.key)}')
+        self.key = None
 
 
 # %%
-
-
 def Cond(tf, ff):
+    """Cond combinator. Turns (tf, ff) into a function of a boolean
+    argument which will switch between the true and false branches."""
+
     def ctor(pred):
+        pred_asint = jnp.int32(pred)
         class Binder:
             def __matmul__(self, address: str):
-                return jax.lax.cond(
-                    jnp.int32(pred), lambda: tf @ address, lambda: ff @ address
+                print(f'tf @ address = {tf @ address}')
+                print(f'ff @ address = {ff @ address}')
+                print(f'pred = {pred} {jnp.int32(pred)} ')
+                retval = jax.lax.cond(
+                    pred_asint, lambda: tf @ address, lambda: ff @ address
                 )
+                print(f'pred = {pred}, retval = {retval}')
+                return retval
+
+            def simulate(self, key: PRNGKeyArray):
+                return GF(lambda: self @ "__cond", ()).simulate(key)
 
         return Binder()
 
     return ctor
 
 
-@Gen
-def switch_prototype(b):
-    flip = Flip(0.5) @ "flip"
-    ma = model1(b)
-    mb = model2(b / 2)
-    a = jax.lax.cond(
-        jnp.int32(flip),
-        lambda: ma @ "s",
-        lambda: mb @ "s",
-    )
-    return a
+def Scan(gf: Gen):
+    """Scan combinator. Turns a GF of two parameters `(state, update)`
+    returning a pair of updated state and step data to record into
+    a generative function of an initial state and an array of updates."""
+
+    def ctor(init, steps):
+        class Binder:
+            def __matmul__(self, address: str):
+                def inner(carry, step):
+                    c, s = gf(carry, step) @ address
+                    return c, s
+
+                return jax.lax.scan(inner, init, steps)
+
+        return Binder()
+
+    return ctor
 
 
-@Gen
-def sp2(b):
-    flip = Flip(0.5) @ "flip"
-    y = Cond(model1(b), model2(b / 2.0))(flip) @ "s"
-    return y
+InAxesT = int | Sequence[Any] | None
 
 
-# switch_prototype(100.0).simulate(key0)
-sp2(100.0).simulate(key0)
-# %%
-jax.vmap(sp2(100.0).simulate)(jax.random.split(key0, 20))
+def Vmap(g: Gen, in_axes: InAxesT = 0):
+    """Note: this Vmap, while it looks like it might sort-of work, is not
+    doing the right thing. Randomness is not propagated along with the
+    batch, for one thing. Idea for now is to work at GFI time, so
+    that we store the information we need, and then adjust simulate
+    be a batched simulate."""
 
+    def ctor(*args):
+        class Binder:
+            def __matmul__(self, address: str):
+                return jax.vmap(lambda *args: g(*args) @ address, in_axes=in_axes)(
+                    *args
+                )
 
-# %%
-model(20.0).simulate(key0)
-# %%
-jax.vmap(model(40.0).simulate)(jax.random.split(key0, 1000))
-# %%
-model1(25.0).simulate(key0)
+            def simulate(self, key: PRNGKeyArray):
+                @Gen
+                def inner():
+                    return self @ "__vmap"
 
+                return inner().simulate(key)
 
-# %%
-@Gen
-def f():
-    return Flip(0.5) @ "f"
+        return Binder()
 
-
-# %%
-jax.vmap(f().simulate)(jax.random.split(key0, 100))
-# %%
-
-switch_prototype(100.0).jaxpr
-
-# %%
-switch_prototype(100.0) @ "x"
-# %%
-jax.vmap(switch_prototype(100.0).simulate)(jax.random.split(key0, 100))
+    return ctor
 
 
 # %%
-@Gen
-def inlier_model(y, sigma_inlier):
-    return Normal(y, sigma_inlier) @ "value"
+import jax
+import jax.numpy as jnp
+a = jnp.array([[[2287280192, 2187889663],
+        [ 172707785,  648420522]],
 
+       [[ 744808397,  299353686],
+        [ 591000125, 1754754195]],
 
-@Gen
-def outlier_model():
-    return Uniform(-1.0, 1.0) @ "value"
+       [[3181103530,  501628485],
+        [3415840785, 1555152824]],
 
+       [[2710077214, 3186870443],
+        [2316526703, 1737740544]],
 
-@Gen
-def curve_model(x, p_outlier):
-    outlier = Flip(p_outlier) @ "outlier"
-    y0 = x**2 - x + 1.0
-    fork = Cond(outlier_model(), inlier_model(y0, 0.1))
-    return fork(outlier) @ "y"
-
+       [[1624561586,  533425566],
+        [2682286958, 3164991847]]], dtype=jnp.uint32)
+a[:,:,0],a[:,:,1]
+# %%
+a[:,1,:].shape
 
 # %%
-curve_model(4, 0.2).simulate(key0)
+keys = jax.random.split(jax.random.PRNGKey(2), 5)
+keys.shape
 # %%
-jax.vmap(curve_model(1.0, 0.2).simulate)(jax.random.split(key0, 10))
+bs = jax.vmap(jax.random.split,in_axes=(0, None))(keys, 2)
+bs.shape
 # %%
-jax.make_jaxpr(lambda x, k: curve_model(x, 0.2).simulate(k))(1.0, key0)
+bs[:,1,:]
 # %%
-# Not working yet: outlier_model doesn't get batched
-# jax.vmap(
-#     lambda k: jax.vmap(
-#         lambda x: curve_model(x, 0.2).simulate(k)
-#     )(jnp.arange(-2, 3.)))(jax.random.split(key0, 10))

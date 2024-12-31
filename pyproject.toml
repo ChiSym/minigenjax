@@ -9,7 +9,7 @@ readme = "README.md"
 [tool.poetry.dependencies]
 python = "^3.10"
 tensorflow-probability = {extras = ["jax"], version = "^0.24.0"}
-jax = "0.4.35"
+jax = "0.4.38"
 jaxtyping = "^0.2.34"
 numpy = "<2.0.0"
 
