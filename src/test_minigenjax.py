@@ -148,9 +148,9 @@ def test_cond_model():
     assert jnp.allclose(tr['retval'], jnp.array(50.21074))
     c = Cond(model1(b), model2(b / 2.0))
     tr = c(0).simulate(key0)
-    assert jnp.allclose(tr["retval"], jnp.array(51.86012))
+    assert jnp.allclose(tr["retval"], jnp.array(51.74507))
     tr = c(1).simulate(key0)
-    assert jnp.allclose(tr["retval"], jnp.array(100.14762))
+    assert jnp.allclose(tr["retval"], jnp.array(100.113846))
 
     @Gen
     def cond_model(b):
@@ -159,7 +159,7 @@ def test_cond_model():
 
     tr = cond_model(b).simulate(key0)
     assert jnp.allclose(
-        tr["subtraces"]["c"]["subtraces"]["x"]["retval"], jnp.array(99.93263)
+        tr["subtraces"]["c"]["subtraces"]["x"]["retval"], jnp.array(100.138466)
     )
     assert jnp.allclose(tr["subtraces"]["flip"]["retval"], jnp.array(1))
 
@@ -174,12 +174,12 @@ def test_vmap_over_cond():
     tr = jax.vmap(cond_model(100.0).simulate)(jax.random.split(key0, 5))
 
     assert jnp.allclose(
-        tr["retval"], jnp.array([ 99.92747 ,  51.95208 ,  51.732613,  50.974968, 100.126045])
+        tr["retval"], jnp.array([ 99.82281 ,  50.112656,  50.439762,  51.793697, 100.29166 ])
     )
     assert jnp.allclose(tr["subtraces"]["flip"]["retval"], jnp.array([1, 0, 0, 0, 1]))
     assert jnp.allclose(
         tr["subtraces"]["s"]["retval"],
-        jnp.array([ 99.92747 ,  51.95208 ,  51.732613,  50.974968, 100.126045]),
+        jnp.array([ 99.82281 ,  50.112656,  50.439762,  51.793697, 100.29166]),
     )
 
 

@@ -150,13 +150,6 @@ class GF[R](GenPrimitive):
         return self.bind(*self.args, at=address)
 
 
-# %%
-
-
-
-
-
-
 class Transformation[R]:
     def __init__(self):
         pass
@@ -196,14 +189,11 @@ class Transformation[R]:
             # clean_up_dead_vars(eqn, env, lu)
         retvals = jax.util.safe_map(read, jaxpr.outvars)
         retval = retvals if len(jaxpr.outvars) > 1 else retvals[0]
-        self.cleanup_state()
         return self.construct_retval(retval)
 
     def construct_retval(self, retval) -> R:
         return retval
 
-    def cleanup_state(self):
-        pass
 
 
 class Simulate(Transformation[dict]):
@@ -224,38 +214,21 @@ class Simulate(Transformation[dict]):
     def transform_inner(self, jaxpr, in_avals):
         """Apply simulate to jaxpr and return the transformed jaxpr together
         with its return shape."""
-        # TODO: this function feels sort of redundant here. Maybe there's a
-        # way to move it up a level.
 
-        key_aval = jax.core.ShapedArray((2,), jnp.uint32)
-
-        def inner(key: PRNGKeyArray, in_avals: tuple):
-            xf = Simulate(key)
-            retval = xf.run(jaxpr, in_avals)
-            xf.key = None
-            return retval
-
-        print(f'S_KEY {self.S_KEY}')
         return jax.make_jaxpr(
-#            lambda key, arg_tuple: Simulate(key).run(jaxpr, arg_tuple),
-            inner,
+            lambda key, in_avals: Simulate(key).run(jaxpr, in_avals),
             return_shape=True,
         )(self.S_KEY, in_avals)
 
     def handle_eqn(self, eqn: jx.core.JaxprEqn, params, bind_params):
         if isinstance(eqn.primitive, GenPrimitive):
-            print(f'point 1: ks.bind {self.key} {id(self.key)}')
             self.key, sub_key = KeySplit.bind(self.key, a='gen_p')
-            print(f'p1 came out OK {self.key} {id(self.key)}')
             ans = eqn.primitive.simulate_p(sub_key, params)
-            sub_key = None
             self.trace[bind_params["at"]] = ans
             return ans["retval"]
 
         if eqn.primitive is jax.lax.cond_p:
-            print(f'point 2: ks.bind {self.key}')
             self.key, sub_key = KeySplit.bind(self.key, a='cond_p')
-            print(f'p2 came out OK: {self.key}')
             branches = bind_params["branches"]
             avals = [v.aval for v in eqn.invars[1:]]
 
@@ -268,11 +241,7 @@ class Simulate(Transformation[dict]):
             transformed_branches = tuple(t[0] for t in transformed)
             shapes = [s[1] for s in transformed]
             new_bind_params = bind_params | {"branches": transformed_branches}
-            print(f'eqn.primitive.bind p0 {params[0]} sub_key {sub_key} p1s {params[1:]} nbp {new_bind_params}')
-            #with jax.checking_leaks():
             ans = eqn.primitive.bind(params[0], sub_key, *params[1:], **new_bind_params)
-            sub_key = None
-            print(f'ans = {ans}')
 
             branch_addresses = tuple(map(self.address_from_branch, branches))
             if branch_addresses[0] and all(
@@ -286,9 +255,7 @@ class Simulate(Transformation[dict]):
             return ans
 
         if eqn.primitive is jax.lax.scan_p:
-            print(f'point 3: ks.bind {self.key}')
             self.key, sub_key = KeySplit.bind(self.key, a='scan_p')
-            print(f'p3 came out OK {self.key}')
             inner = bind_params["jaxpr"]
             # at this point params contains (init, xs). We want to simify with
             # (carry, x) i.e. (init, xs[0])
@@ -328,10 +295,6 @@ class Simulate(Transformation[dict]):
             "subtraces": self.trace,
         }
 
-    def cleanup_state(self):
-        print(f'cleaning up state {self.key} {id(self.key)}')
-        self.key = None
-
 
 # %%
 def Cond(tf, ff):
@@ -342,14 +305,9 @@ def Cond(tf, ff):
         pred_asint = jnp.int32(pred)
         class Binder:
             def __matmul__(self, address: str):
-                print(f'tf @ address = {tf @ address}')
-                print(f'ff @ address = {ff @ address}')
-                print(f'pred = {pred} {jnp.int32(pred)} ')
-                retval = jax.lax.cond(
+                return jax.lax.cond(
                     pred_asint, lambda: tf @ address, lambda: ff @ address
                 )
-                print(f'pred = {pred}, retval = {retval}')
-                return retval
 
             def simulate(self, key: PRNGKeyArray):
                 return GF(lambda: self @ "__cond", ()).simulate(key)
@@ -405,35 +363,3 @@ def Vmap(g: Gen, in_axes: InAxesT = 0):
         return Binder()
 
     return ctor
-
-
-# %%
-import jax
-import jax.numpy as jnp
-a = jnp.array([[[2287280192, 2187889663],
-        [ 172707785,  648420522]],
-
-       [[ 744808397,  299353686],
-        [ 591000125, 1754754195]],
-
-       [[3181103530,  501628485],
-        [3415840785, 1555152824]],
-
-       [[2710077214, 3186870443],
-        [2316526703, 1737740544]],
-
-       [[1624561586,  533425566],
-        [2682286958, 3164991847]]], dtype=jnp.uint32)
-a[:,:,0],a[:,:,1]
-# %%
-a[:,1,:].shape
-
-# %%
-keys = jax.random.split(jax.random.PRNGKey(2), 5)
-keys.shape
-# %%
-bs = jax.vmap(jax.random.split,in_axes=(0, None))(keys, 2)
-bs.shape
-# %%
-bs[:,1,:]
-# %%
