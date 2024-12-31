@@ -5,7 +5,7 @@ import jax
 import jax.tree
 import jax.numpy as jnp
 from jax.interpreters import batching, mlir
-import jax.extend.linear_util as lu
+import jax.extend as jx
 import jax.core
 from jaxtyping import PRNGKeyArray
 
@@ -13,7 +13,7 @@ from jaxtyping import PRNGKeyArray
 PHANTOM_KEY = jax.random.key(987654321)
 
 
-class GenPrimitive(jax.core.Primitive):
+class GenPrimitive(jx.core.Primitive):
     def __init__(self, name):
         super().__init__(name)
         self.def_abstract_eval(self.abstract)
@@ -86,20 +86,16 @@ Categorical = Distribution(
 )
 
 
-class KeySplitP(jax.core.Primitive):
+class KeySplitP(jx.core.Primitive):
     KEY_TYPE = jax.core.ShapedArray((2,), jnp.uint32)
 
     def __init__(self):
         super().__init__("KeySplit")
-        def debug_impl(k, a=None):
-            print(f'ks debug impl {k}')
+        def impl(k, a=None):
             rval = jax.random.split(k, 2)
-            print(f'rval {rval}')
-            print(f'rval[0] {rval[0]}, rval[1] {rval[1]}')
             return rval[0], rval[1]
 
-        #self.def_impl(lambda k, a=None: jax.random.split(k, 2))
-        self.def_impl(debug_impl)
+        self.def_impl(impl)
         self.multiple_results = True
         self.def_abstract_eval(lambda _, a=None: [self.KEY_TYPE, self.KEY_TYPE])
 
@@ -110,17 +106,11 @@ class KeySplitP(jax.core.Primitive):
     def batch(self, vector_args, batch_axes, a=None):
         #key_pair_vector = jax.vmap(self.impl, in_axes=batch_axes)(*vector_args)
         v0, v1 = jax.vmap(self.impl, in_axes=batch_axes)(*vector_args)
-        print(f'batch returning v0 {v0}, v1 {v1}')
-        # Transpose key_pair_vector into a pair of key vectors
-        # return [key_pair_vector[:, :, 0], key_pair_vector[:, :, 1]], (
-        #     batch_axes[0],
-        #     batch_axes[0],
-        # )
         return [v0, v1], (batch_axes[0], batch_axes[0])
 
 
 KeySplit = KeySplitP()
-GenSymT = Callable[[jax.core.AbstractValue], jax.core.Var]
+GenSymT = Callable[[jax.core.AbstractValue], jx.core.Var]
 
 
 # %%
@@ -174,14 +164,14 @@ class Transformation[R]:
     def handle_eqn(self, eqn, params, bind_params):
         return eqn.primitive.bind(*params, **bind_params)
 
-    def run(self, closed_jaxpr: jax.core.ClosedJaxpr, arg_tuple):
+    def run(self, closed_jaxpr: jx.core.ClosedJaxpr, arg_tuple):
         jaxpr = closed_jaxpr.jaxpr
-        env: dict[jax.core.Var, Any] = {}
+        env: dict[jx.core.Var, Any] = {}
 
         def read(v: jax.core.Atom) -> Any:
-            return v.val if isinstance(v, jax.core.Literal) else env[v]
+            return v.val if isinstance(v, jx.core.Literal) else env[v]
 
-        def write(v: jax.core.Var, val: Any) -> None:
+        def write(v: jx.core.Var, val: Any) -> None:
             # if config.enable_checks.value and not config.dynamic_shapes.value:
             #   assert typecheck(v.aval, val), (v.aval, val)
             env[v] = val
@@ -222,7 +212,7 @@ class Simulate(Transformation[dict]):
         self.key = key
         self.trace = {}
 
-    def address_from_branch(self, b: jax.core.ClosedJaxpr):
+    def address_from_branch(self, b: jx.core.ClosedJaxpr):
         """Look at the given JAXPR and find out if it is a single-instruction
         call to a GF traced to an address. If so, return that address. This is
         used to detect when certain JAX primitives (e.g., `scan_p`, `cond_p`)
@@ -252,7 +242,7 @@ class Simulate(Transformation[dict]):
             return_shape=True,
         )(self.S_KEY, in_avals)
 
-    def handle_eqn(self, eqn: jax.core.JaxprEqn, params, bind_params):
+    def handle_eqn(self, eqn: jx.core.JaxprEqn, params, bind_params):
         if isinstance(eqn.primitive, GenPrimitive):
             print(f'point 1: ks.bind {self.key} {id(self.key)}')
             self.key, sub_key = KeySplit.bind(self.key, a='gen_p')
