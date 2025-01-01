@@ -27,7 +27,7 @@ class GenPrimitive(jx.core.Primitive):
     def concrete(self, *args, **kwargs):
         raise NotImplementedError()
 
-    def simulate_p(self, sub_key: PRNGKeyArray, arg_tuple: tuple):
+    def simulate_p(self, key: PRNGKeyArray, arg_tuple: tuple):
         raise NotImplementedError()
 
     def batch(self, vector_args, batch_axes, **kwargs):
@@ -58,8 +58,8 @@ class Distribution(GenPrimitive):
             case _:
                 raise NotImplementedError(f'{self.name}.{kwargs["op"]}')
 
-    def simulate_p(self, sub_key: PRNGKeyArray, arg_tuple: tuple):
-        v = self.bind(sub_key, *arg_tuple[1:], op="Sample")
+    def simulate_p(self, key: PRNGKeyArray, arg_tuple: tuple):
+        v = self.bind(key, *arg_tuple[1:], op="Sample")
         return {"retval": v, "score": self.bind(v, *arg_tuple[1:], op="Score")}
 
     def __call__(self, *args):
@@ -91,6 +91,7 @@ class KeySplitP(jx.core.Primitive):
 
     def __init__(self):
         super().__init__("KeySplit")
+
         def impl(k, a=None):
             rval = jax.random.split(k, 2)
             return rval[0], rval[1]
@@ -104,13 +105,14 @@ class KeySplitP(jx.core.Primitive):
         batching.primitive_batchers[self] = self.batch
 
     def batch(self, vector_args, batch_axes, a=None):
-        #key_pair_vector = jax.vmap(self.impl, in_axes=batch_axes)(*vector_args)
+        # key_pair_vector = jax.vmap(self.impl, in_axes=batch_axes)(*vector_args)
         v0, v1 = jax.vmap(self.impl, in_axes=batch_axes)(*vector_args)
         return [v0, v1], (batch_axes[0], batch_axes[0])
 
 
 KeySplit = KeySplitP()
 GenSymT = Callable[[jax.core.AbstractValue], jx.core.Var]
+InAxesT = int | Sequence[Any] | None
 
 
 # %%
@@ -141,13 +143,19 @@ class GF[R](GenPrimitive):
 
     # TODO: see if we can unify these two: if we're given any args, use them, else use the stored args?
     def simulate(self, key: PRNGKeyArray) -> dict:
-        return Simulate(key).run(self.jaxpr, self.args)
+        return self.simulate_p(key, self.args)
 
-    def simulate_p(self, sub_key: PRNGKeyArray, arg_tuple: tuple) -> dict:
-        return Simulate(sub_key).run(self.jaxpr, arg_tuple)
+    def simulate_p(self, key: PRNGKeyArray, arg_tuple: tuple) -> dict:
+        return Simulate(key).run(self.jaxpr, arg_tuple)
 
     def __matmul__(self, address: str):
         return self.bind(*self.args, at=address)
+
+    def map[S](self, f: Callable[[R], S]) -> "GF[S]":
+        return MapGF(self, f)
+
+    def repeat(self, n: int) -> "GF[R]":
+        return RepeatGF(self, n)
 
 
 class Transformation[R]:
@@ -195,9 +203,9 @@ class Transformation[R]:
         return retval
 
 
-
 class Simulate(Transformation[dict]):
     S_KEY = jax.random.PRNGKey(99999)
+
     def __init__(self, key: PRNGKeyArray):
         self.key = key
         self.trace = {}
@@ -222,13 +230,13 @@ class Simulate(Transformation[dict]):
 
     def handle_eqn(self, eqn: jx.core.JaxprEqn, params, bind_params):
         if isinstance(eqn.primitive, GenPrimitive):
-            self.key, sub_key = KeySplit.bind(self.key, a='gen_p')
+            self.key, sub_key = KeySplit.bind(self.key, a="gen_p")
             ans = eqn.primitive.simulate_p(sub_key, params)
             self.trace[bind_params["at"]] = ans
             return ans["retval"]
 
         if eqn.primitive is jax.lax.cond_p:
-            self.key, sub_key = KeySplit.bind(self.key, a='cond_p')
+            self.key, sub_key = KeySplit.bind(self.key, a="cond_p")
             branches = bind_params["branches"]
             avals = [v.aval for v in eqn.invars[1:]]
 
@@ -255,7 +263,7 @@ class Simulate(Transformation[dict]):
             return ans
 
         if eqn.primitive is jax.lax.scan_p:
-            self.key, sub_key = KeySplit.bind(self.key, a='scan_p')
+            self.key, sub_key = KeySplit.bind(self.key, a="scan_p")
             inner = bind_params["jaxpr"]
             # at this point params contains (init, xs). We want to simify with
             # (carry, x) i.e. (init, xs[0])
@@ -303,10 +311,14 @@ def Cond(tf, ff):
 
     def ctor(pred):
         pred_asint = jnp.int32(pred)
+
         class Binder:
             def __matmul__(self, address: str):
-                return jax.lax.cond(
-                    pred_asint, lambda: tf @ address, lambda: ff @ address
+                # return jax.lax.cond(
+                #     pred_asint, lambda: tf @ address, lambda: ff @ address
+                # )
+                return jax.lax.switch(
+                    pred_asint, [lambda: ff @ address, lambda: tf @ address]
                 )
 
             def simulate(self, key: PRNGKeyArray):
@@ -336,7 +348,28 @@ def Scan(gf: Gen):
     return ctor
 
 
-InAxesT = int | Sequence[Any] | None
+class RepeatGF[R](GF[R]):
+    def __init__(self, gf: GF[R], n: int):
+        super().__init__(gf.f, gf.args)
+        self.n = n
+
+    def simulate_p(self, key: PRNGKeyArray, arg_tuple) -> dict:
+        return jax.vmap(super().simulate_p, in_axes=(0, None))(
+            jax.random.split(key, self.n), arg_tuple
+        )
+
+
+class MapGF[R, S](GF[S]):
+    def __init__(self, gf: GF[R], f: Callable[[R], S]):
+        super().__init__(lambda *args: f(gf.f(*args)), gf.args)
+
+
+# def Repeat(g: Gen):
+#     def ctor(*args):
+#         def inner(n: int):
+#             class Binder:
+#                 def __matmul__(self, address):
+#                     return jax.vmap(g(*args) @ address)(jax.random.split())
 
 
 def Vmap(g: Gen, in_axes: InAxesT = 0):

@@ -55,19 +55,19 @@ def test_uniform_model():
 def test_model_vmap():
     tr = jax.vmap(model(50.0).simulate)(jax.random.split(key0, 5))
     assert jnp.allclose(
-        tr["retval"], jnp.array([75.292915, 76.52893 , 75.79739 , 76.22211 , 76.13692])
+        tr["retval"], jnp.array([75.292915, 76.52893, 75.79739, 76.22211, 76.13692])
     )
     assert jnp.allclose(
         tr["subtraces"]["a"]["subtraces"]["x"]["retval"],
-        jnp.array([49.96525 , 50.06475 , 50.01337 , 50.10502 , 50.147545]),
+        jnp.array([49.96525, 50.06475, 50.01337, 50.10502, 50.147545]),
     )
     assert jnp.allclose(
         tr["subtraces"]["b"]["subtraces"]["x"]["retval"],
-        jnp.array([25.327665, 26.464176, 25.784023, 26.117092, 25.989374 ]),
+        jnp.array([25.327665, 26.464176, 25.784023, 26.117092, 25.989374]),
     )
     assert jnp.allclose(
         tr["subtraces"]["a"]["subtraces"]["x"]["score"],
-        jnp.array([1.3232566 , 1.174024  , 1.3747091 , 0.83221716, 0.29519486]),
+        jnp.array([1.3232566, 1.174024, 1.3747091, 0.83221716, 0.29519486]),
     )
     assert jnp.allclose(
         tr["subtraces"]["b"]["subtraces"]["x"]["score"],
@@ -143,9 +143,9 @@ def test_distribution_as_sampler():
 def test_cond_model():
     b = 100.0
     tr = model1(b).simulate(key0)
-    assert jnp.allclose(tr['retval'], jnp.array(99.87485))
-    tr = model2(b/2).simulate(key0)
-    assert jnp.allclose(tr['retval'], jnp.array(50.21074))
+    assert jnp.allclose(tr["retval"], jnp.array(99.87485))
+    tr = model2(b / 2).simulate(key0)
+    assert jnp.allclose(tr["retval"], jnp.array(50.21074))
     c = Cond(model1(b), model2(b / 2.0))
     tr = c(0).simulate(key0)
     assert jnp.allclose(tr["retval"], jnp.array(51.74507))
@@ -174,12 +174,12 @@ def test_vmap_over_cond():
     tr = jax.vmap(cond_model(100.0).simulate)(jax.random.split(key0, 5))
 
     assert jnp.allclose(
-        tr["retval"], jnp.array([ 99.82281 ,  50.112656,  50.439762,  51.793697, 100.29166 ])
+        tr["retval"], jnp.array([99.82281, 50.112656, 50.439762, 51.793697, 100.29166])
     )
     assert jnp.allclose(tr["subtraces"]["flip"]["retval"], jnp.array([1, 0, 0, 0, 1]))
     assert jnp.allclose(
         tr["subtraces"]["s"]["retval"],
-        jnp.array([ 99.82281 ,  50.112656,  50.439762,  51.793697, 100.29166]),
+        jnp.array([99.82281, 50.112656, 50.439762, 51.793697, 100.29166]),
     )
 
 
@@ -214,33 +214,75 @@ def test_scan_model():
 
 
 def test_curve_model():
+    # %%
     @Gen
     def inlier_model(y, sigma_inlier):
         return Normal(y, sigma_inlier) @ "value"
 
     @Gen
-    def outlier_model():
-        return Uniform(-1.0, 1.0) @ "value"
+    def outlier_model(y):
+        return Uniform(y - 1.0, y + 1.0) @ "value"
 
     @Gen
     def curve_model(x, p_outlier):
         outlier = Flip(p_outlier) @ "outlier"
         y0 = x**2 - x + 1.0
-        fork = Cond(outlier_model(), inlier_model(y0, 0.1))
+        fork = Cond(outlier_model(y0), inlier_model(y0, 0.1))
         return fork(outlier) @ "y"
 
     jax.vmap(curve_model(1.0, 0.2).simulate)(jax.random.split(key0, 10))
-    # doesn't work: investigate
+
+    tr = jax.vmap(lambda x: curve_model(x, 0.2).simulate(key0))(jnp.arange(-3.0, 3.0))
+    assert jnp.allclose(tr["subtraces"]["outlier"]["retval"], jnp.array([1.0]))
+    assert jnp.allclose(
+        tr["retval"],
+        jnp.array([13.833855, 7.8338547, 3.8338544, 1.8338544, 1.8338544, 3.8338544]),
+    )
+    # we didn't change the seed in the vmap, so we got "the same curve" at different x values. Looking at the
+    # function in curve_model, we indeed expect that f(-1) == f(2), f(0) == f(1)
+
     # jax.vmap(lambda x: curve_model(x, 0.2).simulate(key0))(jnp.arange(-3., 3.))
 
     curve_model(4, 0.2).simulate(key0)
     jax.make_jaxpr(lambda x, k: curve_model(x, 0.2).simulate(k))(1.0, key0)
-
+    # %%
     # Not working yet: outlier_model doesn't get batched
     # jax.vmap(
     #     lambda k: jax.vmap(
     #         lambda x: curve_model(x, 0.2).simulate(k)
     #     )(jnp.arange(-2, 3.)))(jax.random.split(key0, 10))
+
+
+def test_map():
+    @Gen
+    def noisy(x):
+        return Normal(x, 0.01) @ "x"
+
+    def plus5(x):
+        return x + 5.0
+
+    nplus5 = noisy(10).map(plus5)
+    tr = jax.vmap(nplus5.simulate)(jax.random.split(key0, 3))
+    assert jnp.allclose(tr["retval"], jnp.array([14.998601, 14.99248, 14.996802]))
+
+
+def test_repeat():
+    @Gen
+    def coefficient():
+        return Normal(0.0, 1.0) @ "c"
+
+    def Poly(coefficient_gf, n):
+        @Gen
+        def poly():
+            return coefficient_gf().repeat(n) @ "cs"
+
+        return poly
+
+    poly4 = Poly(coefficient, 4)
+    tr = poly4().simulate(key0)
+    assert jnp.allclose(
+        tr["retval"], jnp.array([-2.2505789, 0.47611082, 0.5935723, 1.174374])
+    )
 
 
 def test_vmap():
