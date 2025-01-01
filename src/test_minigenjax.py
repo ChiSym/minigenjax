@@ -1,4 +1,5 @@
 # %%
+import dataclasses
 import jax
 import jax.numpy as jnp
 from .minigenjax import *
@@ -283,6 +284,32 @@ def test_repeat():
     assert jnp.allclose(
         tr["retval"], jnp.array([-2.2505789, 0.47611082, 0.5935723, 1.174374])
     )
+
+
+def test_repeat_and_map():
+    @Gen
+    def coefficient():
+        return Normal(0.0, 1.0) @ "c"
+
+    @jax.tree_util.register_dataclass
+    @dataclasses.dataclass
+    class Poly:
+        coefs: jax.Array
+
+        def __call__(self, x):
+            if not self.coefs.shape:
+                return 0.0
+            powers = jnp.pow(x, jnp.arange(len(self.coefs)))
+            return jnp.dot(powers, self.coefs)
+
+    pg = coefficient().repeat(3).map(Poly)
+
+    tr = pg.simulate(key0)
+    assert jnp.allclose(
+        tr["retval"].coefs, jnp.array([-0.13994414, -0.7519509, -0.31980208])
+    )
+    assert jnp.allclose(tr["retval"](1.0), jnp.array(-1.2116971))
+    assert jnp.allclose(tr["retval"](2.0), jnp.array(-2.9230543))
 
 
 def test_vmap():

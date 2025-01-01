@@ -27,9 +27,6 @@ class GenPrimitive(jx.core.Primitive):
     def concrete(self, *args, **kwargs):
         raise NotImplementedError()
 
-    def simulate_p(self, key: PRNGKeyArray, arg_tuple: tuple):
-        raise NotImplementedError()
-
     def batch(self, vector_args, batch_axes, **kwargs):
         # TODO assert all axes equal
         result = jax.vmap(lambda *args: self.impl(*args, **kwargs), in_axes=batch_axes)(
@@ -39,6 +36,10 @@ class GenPrimitive(jx.core.Primitive):
             (batch_axes[0],) * len(result) if self.multiple_results else batch_axes[0]
         )
         return result, batched_axes
+
+
+class GFI[R]:
+    def simulate(self, key: PRNGKeyArray) -> dict: ...
 
 
 class Distribution(GenPrimitive):
@@ -124,6 +125,11 @@ class Gen[R]:
         return GF(self.f, args)
 
 
+# TODO: we need to separate the GFI From GF here.
+# We need a way for combinators to represent the GFI without
+# necessarily holding a bare python function that computes it.
+
+
 class GF[R](GenPrimitive):
     def __init__(self, f: Callable[..., R], args: tuple):
         super().__init__(f"GF[{f.__name__}]")
@@ -151,7 +157,7 @@ class GF[R](GenPrimitive):
     def __matmul__(self, address: str):
         return self.bind(*self.args, at=address)
 
-    def map[S](self, f: Callable[[R], S]) -> "GF[S]":
+    def map[S](self, f: Callable[[R], S]) -> "GFI[S]":
         return MapGF(self, f)
 
     def repeat(self, n: int) -> "GF[R]":
@@ -358,10 +364,21 @@ class RepeatGF[R](GF[R]):
             jax.random.split(key, self.n), arg_tuple
         )
 
+# TODO: we have some problems here. To allow follow-on combinators,
+# we currently need to be a GF, not a GFI. So maybe the combinators
+# move to GFI? And maybe both simulate and simulate_p?
 
-class MapGF[R, S](GF[S]):
+class MapGF[R, S](GFI):
     def __init__(self, gf: GF[R], f: Callable[[R], S]):
-        super().__init__(lambda *args: f(gf.f(*args)), gf.args)
+        # super().__init__(lambda *args: f(gf.f(*args)), gf.args)
+        # super().__init__(gf.f, gf.args)
+        self.gf = gf
+        self.f = f
+
+    def simulate(self, key: PRNGKeyArray) -> dict:
+        v = self.gf.simulate(key)
+        v["retval"] = self.f(v["retval"])
+        return v
 
 
 # def Repeat(g: Gen):
