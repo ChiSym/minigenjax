@@ -37,9 +37,14 @@ class GenPrimitive(jx.core.Primitive):
         )
         return result, batched_axes
 
+    def simulate_p(self, key: PRNGKeyArray, arg_tuple: tuple) -> dict:
+        raise NotImplementedError()
+
 
 class GFI[R]:
     def simulate(self, key: PRNGKeyArray) -> dict: ...
+    def __matmul__(self, address: str) -> R: ...
+
 
 
 class Distribution(GenPrimitive):
@@ -368,7 +373,7 @@ class RepeatGF[R](GF[R]):
 # we currently need to be a GF, not a GFI. So maybe the combinators
 # move to GFI? And maybe both simulate and simulate_p?
 
-class MapGF[R, S](GFI):
+class MapGF[R, S](GFI[S]):
     def __init__(self, gf: GF[R], f: Callable[[R], S]):
         # super().__init__(lambda *args: f(gf.f(*args)), gf.args)
         # super().__init__(gf.f, gf.args)
@@ -379,6 +384,10 @@ class MapGF[R, S](GFI):
         v = self.gf.simulate(key)
         v["retval"] = self.f(v["retval"])
         return v
+
+    def __matmul__(self, address: str) -> S:
+        return self.f(self.gf @ address)
+
 
 
 # def Repeat(g: Gen):
