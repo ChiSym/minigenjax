@@ -7,8 +7,8 @@ license = "MIT"
 readme = "README.md"
 
 [tool.poetry.dependencies]
-python = "^3.10"
-tensorflow-probability = {extras = ["jax"], version = "^0.24.0"}
+python = "^3.12"
+tensorflow-probability = {extras = ["jax"], version = "^0.25.0"}
 jax = "0.4.38"
 jaxtyping = "^0.2.34"
 numpy = "<2.0.0"

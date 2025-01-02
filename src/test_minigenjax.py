@@ -285,31 +285,38 @@ def test_repeat():
         tr["retval"], jnp.array([-2.2505789, 0.47611082, 0.5935723, 1.174374])
     )
 
+
 def test_repeat_in_model():
     @Gen
     def x(y):
-        return Normal(2.0 * y, 1.0) @ 'x'
+        return Normal(2.0 * y, 1.0) @ "x"
 
     @Gen
     def xs():
-        return x(10.).repeat(4) @ 'xs'
+        return x(10.0).repeat(4) @ "xs"
 
     tr = xs().simulate(key0)
-    assert jnp.allclose(tr['retval'], jnp.array([17.74942 , 20.47611 , 20.593573, 21.174374]))
+    assert jnp.allclose(
+        tr["retval"], jnp.array([17.74942, 20.47611, 20.593573, 21.174374])
+    )
+
 
 def test_map_in_model():
     @Gen
     def x(y):
-        return Normal(y, 0.1) @ 'x'
+        return Normal(y, 0.1) @ "x"
 
     @Gen
     def mx():
-        return x(7.0).map(lambda t: t+13.) @ 'mx'
+        return x(7.0).map(lambda t: t + 13.0) @ "mx"
 
     tr = jax.vmap(mx().simulate)(jax.random.split(key0, 5))
-    assert jnp.allclose(tr['retval'], jnp.array([19.965248, 20.06475 , 20.013372, 20.105017, 20.147545]))
+    assert jnp.allclose(
+        tr["retval"], jnp.array([19.965248, 20.06475, 20.013372, 20.105017, 20.147545])
+    )
 
-def test_repeat_and_map():
+
+def test_map_of_repeat():
     @Gen
     def coefficient():
         return Normal(0.0, 1.0) @ "c"
@@ -333,6 +340,17 @@ def test_repeat_and_map():
     )
     assert jnp.allclose(tr["retval"](1.0), jnp.array(-1.2116971))
     assert jnp.allclose(tr["retval"](2.0), jnp.array(-2.9230543))
+
+def test_repeat_of_map():
+    @Gen
+    def y(x):
+        return Normal(x, 0.1) @ 'y'
+
+    mr = y(7.).map(lambda x: x+13.).repeat(5)
+
+    tr = mr.simulate(key0)
+    assert jnp.allclose(tr['retval'], jnp.array([19.966385, 20.016861, 20.021904, 20.22247 , 19.879295]))
+
 
 
 def test_vmap():

@@ -9,10 +9,8 @@ import jax.extend as jx
 import jax.core
 from jaxtyping import PRNGKeyArray
 
+
 # %%
-PHANTOM_KEY = jax.random.key(987654321)
-
-
 class GenPrimitive(jx.core.Primitive):
     def __init__(self, name):
         super().__init__(name)
@@ -22,10 +20,10 @@ class GenPrimitive(jx.core.Primitive):
         batching.primitive_batchers[self] = self.batch
 
     def abstract(self, *args, **kwargs):
-        raise NotImplementedError()
+        raise NotImplementedError(f'abstract: {self}')
 
     def concrete(self, *args, **kwargs):
-        raise NotImplementedError()
+        raise NotImplementedError(f'concrete: {self}')
 
     def batch(self, vector_args, batch_axes, **kwargs):
         # TODO assert all axes equal
@@ -40,14 +38,29 @@ class GenPrimitive(jx.core.Primitive):
     def simulate_p(self, key: PRNGKeyArray, arg_tuple: tuple) -> dict:
         raise NotImplementedError()
 
+class GFI[R](GenPrimitive):
+    def __init__(self, name):
+        super().__init__(name)
 
-class GFI[R]:
-    def simulate(self, key: PRNGKeyArray) -> dict: ...
-    def __matmul__(self, address: str) -> R: ...
+    # TODO: should simulate be here?
+    def simulate(self, key: PRNGKeyArray) -> dict:
+        raise NotImplementedError(f'simulate: {self}')
 
+    def __matmul__(self, address: str) -> R:
+        raise NotImplementedError(f'{self} @ {address}')
 
+    def map[S](self, f: Callable[[R], S]) -> "GFI[S]":
+        return MapGF(self, f)
+
+    def repeat(self, n: int) -> "GFI[R]":
+        return RepeatGF(self, n)
+
+    def get_args(self) -> tuple:
+        raise NotImplementedError(f'get_args {self}')
 
 class Distribution(GenPrimitive):
+    PHANTOM_KEY = jax.random.key(987654321)
+
     def __init__(self, name, tfd_ctor):
         super().__init__(name)
         self.tfd_ctor = tfd_ctor
@@ -73,7 +86,7 @@ class Distribution(GenPrimitive):
 
         class Binder:
             def __matmul__(self, address: str):
-                return this.bind(PHANTOM_KEY, *args, at=address)
+                return this.bind(this.PHANTOM_KEY, *args, at=address)
 
             def __call__(self, key: PRNGKeyArray):
                 return this.tfd_ctor(*args).sample(seed=key)
@@ -135,7 +148,7 @@ class Gen[R]:
 # necessarily holding a bare python function that computes it.
 
 
-class GF[R](GenPrimitive):
+class GF[R](GFI[R]):
     def __init__(self, f: Callable[..., R], args: tuple):
         super().__init__(f"GF[{f.__name__}]")
         self.f = f
@@ -145,7 +158,7 @@ class GF[R](GenPrimitive):
         a_vals = [ov.aval for ov in self.jaxpr.jaxpr.outvars]
         self.abstract_value = a_vals if self.multiple_results else a_vals[0]
 
-    def abstract(self, *args, at: str):
+    def abstract(self, *args, at: str, **_kwargs):
         return self.abstract_value
 
     def concrete(self, *args, at: str):
@@ -162,11 +175,8 @@ class GF[R](GenPrimitive):
     def __matmul__(self, address: str):
         return self.bind(*self.args, at=address)
 
-    def map[S](self, f: Callable[[R], S]) -> "GFI[S]":
-        return MapGF(self, f)
-
-    def repeat(self, n: int) -> "GF[R]":
-        return RepeatGF(self, n)
+    def get_args(self) -> tuple:
+        return self.args
 
 
 class Transformation[R]:
@@ -359,43 +369,56 @@ def Scan(gf: Gen):
     return ctor
 
 
-class RepeatGF[R](GF[R]):
-    def __init__(self, gf: GF[R], n: int):
-        super().__init__(gf.f, gf.args)
+class RepeatGF[R](GFI[R]):
+    def __init__(self, gfi: GFI[R], n: int):
+        super().__init__(f'Repeat[{gfi.name}]')
+        self.gfi = gfi
         self.n = n
 
+    def abstract(self, *args, **kwargs):
+        a = self.gfi.abstract(*args, **kwargs)
+        assert isinstance(a, jax.core.ShapedArray)
+        # just because we aren't sure how to deal with structure yet
+        return jax.core.ShapedArray((self.n,)+a.shape, a.dtype)
+
+    def simulate(self, key):
+        return jax.vmap(self.gfi.simulate)(jax.random.split(key, self.n))
+
     def simulate_p(self, key: PRNGKeyArray, arg_tuple) -> dict:
-        return jax.vmap(super().simulate_p, in_axes=(0, None))(
+        return jax.vmap(self.gfi.simulate_p, in_axes=(0, None))(
             jax.random.split(key, self.n), arg_tuple
         )
 
-# TODO: we have some problems here. To allow follow-on combinators,
-# we currently need to be a GF, not a GFI. So maybe the combinators
-# move to GFI? And maybe both simulate and simulate_p?
+    def __matmul__(self, address: str) -> R:
+        return self.bind(*self.gfi.get_args(), at=address, gfi=self.gfi, n=self.n)
+
+
+    #     #return self.bind(*self.gfi.args, at=address)  # XXX obviously bogus
+    #     #return jax.vmap(lambda _: self.gfi @ address)(jnp.arange(self.n))
+    #     def inner(i, a):
+    #         b = self.gfi@address
+    #         print(f'inner {a} {b}')
+    #         return jnp.stack([a, self.gfi @ address])
+
+    #     return jax.lax.fori_loop(0, self.n, inner, jnp.array(0))
+
+
 
 class MapGF[R, S](GFI[S]):
-    def __init__(self, gf: GF[R], f: Callable[[R], S]):
+    def __init__(self, gfi: GFI[R], f: Callable[[R], S]):
+        super().__init__(f'Map[{gfi.name}, f.__name__]')
         # super().__init__(lambda *args: f(gf.f(*args)), gf.args)
         # super().__init__(gf.f, gf.args)
-        self.gf = gf
+        self.gfi = gfi
         self.f = f
 
     def simulate(self, key: PRNGKeyArray) -> dict:
-        v = self.gf.simulate(key)
+        v = self.gfi.simulate(key)
         v["retval"] = self.f(v["retval"])
         return v
 
     def __matmul__(self, address: str) -> S:
-        return self.f(self.gf @ address)
-
-
-
-# def Repeat(g: Gen):
-#     def ctor(*args):
-#         def inner(n: int):
-#             class Binder:
-#                 def __matmul__(self, address):
-#                     return jax.vmap(g(*args) @ address)(jax.random.split())
+        return self.f(self.gfi @ address)
 
 
 def Vmap(g: Gen, in_axes: InAxesT = 0):
@@ -422,3 +445,5 @@ def Vmap(g: Gen, in_axes: InAxesT = 0):
         return Binder()
 
     return ctor
+
+# %%
