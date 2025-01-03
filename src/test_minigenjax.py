@@ -341,16 +341,18 @@ def test_map_of_repeat():
     assert jnp.allclose(tr["retval"](1.0), jnp.array(-1.2116971))
     assert jnp.allclose(tr["retval"](2.0), jnp.array(-2.9230543))
 
+
 def test_repeat_of_map():
     @Gen
     def y(x):
-        return Normal(x, 0.1) @ 'y'
+        return Normal(x, 0.1) @ "y"
 
-    mr = y(7.).map(lambda x: x+13.).repeat(5)
+    mr = y(7.0).map(lambda x: x + 13.0).repeat(5)
 
     tr = mr.simulate(key0)
-    assert jnp.allclose(tr['retval'], jnp.array([19.966385, 20.016861, 20.021904, 20.22247 , 19.879295]))
-
+    assert jnp.allclose(
+        tr["retval"], jnp.array([19.966385, 20.016861, 20.021904, 20.22247, 19.879295])
+    )
 
 
 def test_vmap():

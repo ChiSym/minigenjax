@@ -20,10 +20,10 @@ class GenPrimitive(jx.core.Primitive):
         batching.primitive_batchers[self] = self.batch
 
     def abstract(self, *args, **kwargs):
-        raise NotImplementedError(f'abstract: {self}')
+        raise NotImplementedError(f"abstract: {self}")
 
     def concrete(self, *args, **kwargs):
-        raise NotImplementedError(f'concrete: {self}')
+        raise NotImplementedError(f"concrete: {self}")
 
     def batch(self, vector_args, batch_axes, **kwargs):
         # TODO assert all axes equal
@@ -36,7 +36,8 @@ class GenPrimitive(jx.core.Primitive):
         return result, batched_axes
 
     def simulate_p(self, key: PRNGKeyArray, arg_tuple: tuple) -> dict:
-        raise NotImplementedError(f'simulate_p: {self}')
+        raise NotImplementedError(f"simulate_p: {self}")
+
 
 class GFI[R](GenPrimitive):
     def __init__(self, name):
@@ -44,19 +45,20 @@ class GFI[R](GenPrimitive):
 
     # TODO: should simulate be here?
     def simulate(self, key: PRNGKeyArray) -> dict:
-        raise NotImplementedError(f'simulate: {self}')
+        raise NotImplementedError(f"simulate: {self}")
 
     def __matmul__(self, address: str) -> R:
-        raise NotImplementedError(f'{self} @ {address}')
+        raise NotImplementedError(f"{self} @ {address}")
 
     def get_args(self) -> tuple:
-        raise NotImplementedError(f'get_args: {self}')
+        raise NotImplementedError(f"get_args: {self}")
 
     def map[S](self, f: Callable[[R], S]) -> "GFI[S]":
         return MapGF(self, f)
 
     def repeat(self, n: int) -> "GFI[R]":
         return RepeatGF(self, n)
+
 
 class Distribution(GenPrimitive):
     PHANTOM_KEY = jax.random.key(987654321)
@@ -252,7 +254,9 @@ class Simulate(Transformation[dict]):
     def handle_eqn(self, eqn: jx.core.JaxprEqn, params, bind_params):
         if isinstance(eqn.primitive, RepeatGF):
             self.key, sub_key = KeySplit.bind(self.key, a="repeat")
-            ans = jax.vmap(bind_params['gfi'].simulate)(jax.random.split(sub_key, bind_params['n']))
+            ans = jax.vmap(bind_params["gfi"].simulate)(
+                jax.random.split(sub_key, bind_params["n"])
+            )
             self.trace[bind_params["at"]] = ans
             return ans["retval"]
 
@@ -377,7 +381,7 @@ def Scan(gf: Gen):
 
 class RepeatGF[R](GFI[R]):
     def __init__(self, gfi: GFI[R], n: int):
-        super().__init__(f'Repeat[{gfi.name}]')
+        super().__init__(f"Repeat[{gfi.name}]")
         self.gfi = gfi
         self.n = n
 
@@ -385,13 +389,15 @@ class RepeatGF[R](GFI[R]):
         a = self.gfi.abstract(*args, **kwargs)
         assert isinstance(a, jax.core.ShapedArray)
         # just because we aren't sure how to deal with structure yet
-        return jax.core.ShapedArray((self.n,)+a.shape, a.dtype)
+        return jax.core.ShapedArray((self.n,) + a.shape, a.dtype)
 
     def simulate(self, key: PRNGKeyArray) -> dict:
         return self.simulate_p(key, self.gfi.get_args())
 
     def simulate_p(self, key: PRNGKeyArray, arg_tuple) -> dict:
-        return jax.vmap(self.gfi.simulate_p, in_axes=(0, None))(jax.random.split(key, self.n), arg_tuple)
+        return jax.vmap(self.gfi.simulate_p, in_axes=(0, None))(
+            jax.random.split(key, self.n), arg_tuple
+        )
 
     def __matmul__(self, address: str) -> R:
         return self.bind(*self.gfi.get_args(), at=address, gfi=self.gfi, n=self.n)
@@ -399,9 +405,10 @@ class RepeatGF[R](GFI[R]):
     def get_args(self) -> tuple:
         return self.gfi.get_args()
 
+
 class MapGF[R, S](GFI[S]):
     def __init__(self, gfi: GFI[R], f: Callable[[R], S]):
-        super().__init__(f'Map[{gfi.name}, {f.__name__}]')
+        super().__init__(f"Map[{gfi.name}, {f.__name__}]")
         # super().__init__(lambda *args: f(gf.f(*args)), gf.args)
         # super().__init__(gf.f, gf.args)
         self.gfi = gfi
@@ -412,7 +419,7 @@ class MapGF[R, S](GFI[S]):
 
     def simulate_p(self, key: PRNGKeyArray, arg_tuple: tuple) -> dict:
         v = self.gfi.simulate_p(key, arg_tuple)
-        v['retval'] = self.f(v['retval'])
+        v["retval"] = self.f(v["retval"])
         return v
 
     def __matmul__(self, address: str) -> S:
@@ -420,6 +427,7 @@ class MapGF[R, S](GFI[S]):
 
     def get_args(self) -> tuple:
         return self.gfi.get_args()
+
 
 def Vmap(g: Gen, in_axes: InAxesT = 0):
     """Note: this Vmap, while it looks like it might sort-of work, is not
@@ -445,4 +453,3 @@ def Vmap(g: Gen, in_axes: InAxesT = 0):
         return Binder()
 
     return ctor
-
