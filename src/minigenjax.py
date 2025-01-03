@@ -36,7 +36,7 @@ class GenPrimitive(jx.core.Primitive):
         return result, batched_axes
 
     def simulate_p(self, key: PRNGKeyArray, arg_tuple: tuple) -> dict:
-        raise NotImplementedError()
+        raise NotImplementedError(f'simulate_p: {self}')
 
 class GFI[R](GenPrimitive):
     def __init__(self, name):
@@ -49,14 +49,14 @@ class GFI[R](GenPrimitive):
     def __matmul__(self, address: str) -> R:
         raise NotImplementedError(f'{self} @ {address}')
 
+    def get_args(self) -> tuple:
+        raise NotImplementedError(f'get_args: {self}')
+
     def map[S](self, f: Callable[[R], S]) -> "GFI[S]":
         return MapGF(self, f)
 
     def repeat(self, n: int) -> "GFI[R]":
         return RepeatGF(self, n)
-
-    def get_args(self) -> tuple:
-        raise NotImplementedError(f'get_args {self}')
 
 class Distribution(GenPrimitive):
     PHANTOM_KEY = jax.random.key(987654321)
@@ -231,7 +231,7 @@ class Simulate(Transformation[dict]):
         self.key = key
         self.trace = {}
 
-    def address_from_branch(self, b: jx.core.ClosedJaxpr):
+    def address_from_branch(sel7f, b: jx.core.ClosedJaxpr):
         """Look at the given JAXPR and find out if it is a single-instruction
         call to a GF traced to an address. If so, return that address. This is
         used to detect when certain JAX primitives (e.g., `scan_p`, `cond_p`)
@@ -250,6 +250,12 @@ class Simulate(Transformation[dict]):
         )(self.S_KEY, in_avals)
 
     def handle_eqn(self, eqn: jx.core.JaxprEqn, params, bind_params):
+        if isinstance(eqn.primitive, RepeatGF):
+            self.key, sub_key = KeySplit.bind(self.key, a="repeat")
+            ans = jax.vmap(bind_params['gfi'].simulate)(jax.random.split(sub_key, bind_params['n']))
+            self.trace[bind_params["at"]] = ans
+            return ans["retval"]
+
         if isinstance(eqn.primitive, GenPrimitive):
             self.key, sub_key = KeySplit.bind(self.key, a="gen_p")
             ans = eqn.primitive.simulate_p(sub_key, params)
@@ -381,45 +387,39 @@ class RepeatGF[R](GFI[R]):
         # just because we aren't sure how to deal with structure yet
         return jax.core.ShapedArray((self.n,)+a.shape, a.dtype)
 
-    def simulate(self, key):
-        return jax.vmap(self.gfi.simulate)(jax.random.split(key, self.n))
+    def simulate(self, key: PRNGKeyArray) -> dict:
+        return self.simulate_p(key, self.gfi.get_args())
 
     def simulate_p(self, key: PRNGKeyArray, arg_tuple) -> dict:
-        return jax.vmap(self.gfi.simulate_p, in_axes=(0, None))(
-            jax.random.split(key, self.n), arg_tuple
-        )
+        return jax.vmap(self.gfi.simulate_p, in_axes=(0, None))(jax.random.split(key, self.n), arg_tuple)
 
     def __matmul__(self, address: str) -> R:
         return self.bind(*self.gfi.get_args(), at=address, gfi=self.gfi, n=self.n)
 
-
-    #     #return self.bind(*self.gfi.args, at=address)  # XXX obviously bogus
-    #     #return jax.vmap(lambda _: self.gfi @ address)(jnp.arange(self.n))
-    #     def inner(i, a):
-    #         b = self.gfi@address
-    #         print(f'inner {a} {b}')
-    #         return jnp.stack([a, self.gfi @ address])
-
-    #     return jax.lax.fori_loop(0, self.n, inner, jnp.array(0))
-
-
+    def get_args(self) -> tuple:
+        return self.gfi.get_args()
 
 class MapGF[R, S](GFI[S]):
     def __init__(self, gfi: GFI[R], f: Callable[[R], S]):
-        super().__init__(f'Map[{gfi.name}, f.__name__]')
+        super().__init__(f'Map[{gfi.name}, {f.__name__}]')
         # super().__init__(lambda *args: f(gf.f(*args)), gf.args)
         # super().__init__(gf.f, gf.args)
         self.gfi = gfi
         self.f = f
 
     def simulate(self, key: PRNGKeyArray) -> dict:
-        v = self.gfi.simulate(key)
-        v["retval"] = self.f(v["retval"])
+        return self.simulate_p(key, self.gfi.get_args())
+
+    def simulate_p(self, key: PRNGKeyArray, arg_tuple: tuple) -> dict:
+        v = self.gfi.simulate_p(key, arg_tuple)
+        v['retval'] = self.f(v['retval'])
         return v
 
     def __matmul__(self, address: str) -> S:
         return self.f(self.gfi @ address)
 
+    def get_args(self) -> tuple:
+        return self.gfi.get_args()
 
 def Vmap(g: Gen, in_axes: InAxesT = 0):
     """Note: this Vmap, while it looks like it might sort-of work, is not
@@ -446,4 +446,3 @@ def Vmap(g: Gen, in_axes: InAxesT = 0):
 
     return ctor
 
-# %%
