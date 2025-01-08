@@ -3,6 +3,7 @@ import dataclasses
 import jax
 import jax.numpy as jnp
 from .minigenjax import *
+import pytest
 
 
 @Gen
@@ -22,6 +23,11 @@ def model(x):
     b = model2(x / 2.0) @ "b"
     return a + b
 
+@Gen
+def cond_model(b):
+    flip = Flip(0.5) @ "flip"
+    y = Cond(model1(b), model2(b / 2.0))(flip) @ "s"
+    return y
 
 key0 = jax.random.PRNGKey(0)
 
@@ -166,12 +172,6 @@ def test_cond_model():
 
 
 def test_vmap_over_cond():
-    @Gen
-    def cond_model(b):
-        flip = Flip(0.5) @ "flip"
-        y = Cond(model1(b), model2(b / 2.0))(flip) @ "s"
-        return y
-
     tr = jax.vmap(cond_model(100.0).simulate)(jax.random.split(key0, 5))
 
     assert jnp.allclose(
@@ -184,7 +184,6 @@ def test_vmap_over_cond():
     )
 
 
-# @pytest.mark.skip(reason="not ready yet")
 def test_scan_model():
     @Gen
     def update(state, delta):
@@ -354,6 +353,13 @@ def test_repeat_of_map():
         tr["retval"], jnp.array([19.966385, 20.016861, 20.021904, 20.22247, 19.879295])
     )
 
+@pytest.mark.skip(reason="possible bug in JAX preventing this from working")
+def test_repeat_of_cond():
+    repeated_model = cond_model(60.0).repeat(6)
+    tr = repeated_model.simulate(key0)
+    assert jnp.allclose(
+        tr['retval'], jnp.array([1.0])
+    )
 
 def test_vmap():
     @Gen
