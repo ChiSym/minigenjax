@@ -260,11 +260,9 @@ def test_curve_model():
         jnp.array([13.833855, 7.8338547, 3.8338544, 1.8338544, 1.8338544, 3.8338544]),
     )
 
-
     tr = curve_model.vmap(in_axes=(None, 0))(
         0.0, jnp.array([0.001, 0.01, 0.1])
     ).simulate(key0)
-
 
     # tr2 = curve_model(jnp.arange(0.0, 1.0, 0.1), 0.2).vmap(in_axes=(0, None)).simulate(key0)
 

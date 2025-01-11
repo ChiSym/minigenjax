@@ -38,7 +38,9 @@ class GenPrimitive(jx.core.Primitive):
     def simulate_p(self, key: PRNGKeyArray, arg_tuple: tuple) -> dict:
         raise NotImplementedError(f"simulate_p: {self}")
 
+
 InAxesT = int | Sequence[Any] | None
+
 
 class GFI[R](GenPrimitive):
     def __init__(self, name):
@@ -58,6 +60,7 @@ class GFI[R](GenPrimitive):
 
     def repeat(self, n: int) -> "RepeatGF[R]":
         return RepeatGF(self, n)
+
 
 class Distribution(GenPrimitive):
     PHANTOM_KEY = jax.random.key(987654321)
@@ -143,8 +146,7 @@ class Gen[R]:
         return GF(self.f, args)
 
     def vmap(self, in_axes: InAxesT = 0) -> Callable[..., "VmapGF[R]"]:
-        return Vmap(self, in_axes=in_axes)
-
+        return lambda *args: VmapGF(self, args, in_axes)
 
 
 # TODO: we need to separate the GFI From GF here.
@@ -383,9 +385,9 @@ class RepeatGF[R](GFI[R]):
         return self.simulate_p(args[0], args[1:])
 
     def simulate_p(self, key: PRNGKeyArray, arg_tuple) -> dict:
-        return jax.vmap(jax.custom_batching.sequential_vmap(self.gfi.simulate_p), in_axes=(0, None))(
-            jax.random.split(key, self.n), arg_tuple
-        )
+        return jax.vmap(
+            jax.custom_batching.sequential_vmap(self.gfi.simulate_p), in_axes=(0, None)
+        )(jax.random.split(key, self.n), arg_tuple)
 
     def __matmul__(self, address: str) -> R:
         return self.bind(*self.gfi.get_args(), at=address)
@@ -393,45 +395,33 @@ class RepeatGF[R](GFI[R]):
     def get_args(self) -> tuple:
         return self.gfi.get_args()
 
+
 class VmapGF[R](GFI[R]):
-    def __init__(self, name, jaxpr: jx.core.ClosedJaxpr, arg_tuple: tuple, in_axes: InAxesT):
-        super().__init__(f"Vmap[{name}]")
+    def __init__(self, g: Gen, arg_tuple: tuple, in_axes: InAxesT):
+        super().__init__(f"Vmap[{g.f.__name__}]")
         if in_axes is None or in_axes == ():
-            raise NotImplementedError("must specify at least one argument/axis for Vmap")
+            raise NotImplementedError(
+                "must specify at least one argument/axis for Vmap"
+            )
         self.arg_tuple = arg_tuple
         self.in_axes = in_axes
-        self.jaxpr = jaxpr
         # find one pair of (parameter number, axis) to use to determine size of vmap
         if isinstance(self.in_axes, tuple):
-            self.p_index, self.an_axis = next(filter(lambda b: b[1] is not None, enumerate(self.in_axes)))
+            self.p_index, self.an_axis = next(
+                filter(lambda b: b[1] is not None, enumerate(self.in_axes))
+            )
         else:
             self.p_index, self.an_axis = 0, self.in_axes
+        # Compute the "scalar" jaxpr by feeding the un-vmapped arguments to make_jaxpr
+        self.jaxpr = jax.make_jaxpr(g.f)(*self.reduced_avals(arg_tuple))
 
-    def simulate_p(self, key: PRNGKeyArray, arg_tuple: tuple) -> dict:
-        n = arg_tuple[self.p_index].shape[self.an_axis]
-        def inner(k: PRNGKeyArray, arg_tuple):
-            return Simulate(k).run(self.jaxpr, arg_tuple)
-        return jax.vmap(jax.custom_batching.sequential_vmap(inner), in_axes=(0, self.in_axes))(
-            jax.random.split(key, n),
-            arg_tuple
-        )
-
-    def get_args(self) -> tuple:
-        return self.arg_tuple
-
-
-def Vmap(g: Gen, in_axes: InAxesT = 0):
-    # maybe make this a class; I don't know yet
-    if in_axes is None:
-        raise NotImplementedError("Cannot vmap over None")
-
-    def reduced_avals(arg_tuple):
+    def reduced_avals(self, arg_tuple):
         # if in_axes is not an tuple, lift it to the same shape as arg tuple
-        if isinstance(in_axes, int):
-            ia = jax.tree.map(lambda _: in_axes, arg_tuple)
+        if isinstance(self.in_axes, int):
+            ia = jax.tree.map(lambda _: self.in_axes, arg_tuple)
         else:
-            ia = in_axes
-        print(f'in_axes {in_axes} ia {ia}')
+            ia = self.in_axes
+
         # Now produce an abstract arg tuple in which the shape of the
         # arrays is contracted in those position where vmap would expect
         # to find a mapping axis
@@ -440,29 +430,23 @@ def Vmap(g: Gen, in_axes: InAxesT = 0):
                 return array
             aval = jax.core.get_aval(array)
             # delete the indicated axes from teh shape tuple
-            print(f'array {array} axis {axis} aval {aval}')
             assert isinstance(aval, jax.core.ShapedArray)
-            return aval.update(shape=aval.shape[:axis] + aval.shape[axis+1:])
+            return aval.update(shape=aval.shape[:axis] + aval.shape[axis + 1 :])
 
         return jax.tree.map(deflate, arg_tuple, ia)
 
+    def simulate_p(self, key: PRNGKeyArray, arg_tuple: tuple) -> dict:
+        n = arg_tuple[self.p_index].shape[self.an_axis]
 
-    def ctor(*args):
-        # we need to get a JAXPR for the un-vmapped GF inside, so that we can
-        # perform a simulate transform on it. But the only arguments we'll ever
-        # see are the vectorized arguments, which is why this is tricky.
-        r_avals = reduced_avals(args)
-        print(f'r_avals {r_avals}')
-        j = jax.make_jaxpr(g.f)(*r_avals)
-        print(f'jaxpr {j}')
-        v = VmapGF(g.f.__name__, j, args, in_axes)
-        print(f'v {v}')
-        return v
+        def inner(k: PRNGKeyArray, arg_tuple):
+            return Simulate(k).run(self.jaxpr, arg_tuple)
 
-    return ctor
+        return jax.vmap(
+            jax.custom_batching.sequential_vmap(inner), in_axes=(0, self.in_axes)
+        )(jax.random.split(key, n), arg_tuple)
 
-
-
+    def get_args(self) -> tuple:
+        return self.arg_tuple
 
 
 class MapGF[R, S](GFI[S]):
@@ -481,10 +465,3 @@ class MapGF[R, S](GFI[S]):
 
     def get_args(self) -> tuple:
         return self.gfi.get_args()
-
-
-# %%
-ia = (0, (0, 0))
-a = (10, (20, 30))
-jax.tree.map(lambda a, b: print(f'a {a} b {b}'), a, ia)
-# %%
