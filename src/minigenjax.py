@@ -38,14 +38,14 @@ class GenPrimitive(jx.core.Primitive):
     def simulate_p(self, key: PRNGKeyArray, arg_tuple: tuple) -> dict:
         raise NotImplementedError(f"simulate_p: {self}")
 
+InAxesT = int | Sequence[Any] | None
 
 class GFI[R](GenPrimitive):
     def __init__(self, name):
         super().__init__(name)
 
-    # TODO: should simulate be here?
     def simulate(self, key: PRNGKeyArray) -> dict:
-        raise NotImplementedError(f"simulate: {self}")
+        return self.simulate_p(key, self.get_args())
 
     def __matmul__(self, address: str) -> R:
         raise NotImplementedError(f"{self} @ {address}")
@@ -53,12 +53,11 @@ class GFI[R](GenPrimitive):
     def get_args(self) -> tuple:
         raise NotImplementedError(f"get_args: {self}")
 
-    def map[S](self, f: Callable[[R], S]) -> "GFI[S]":
+    def map[S](self, f: Callable[[R], S]) -> "MapGF[R,S]":
         return MapGF(self, f)
 
-    def repeat(self, n: int) -> "GFI[R]":
+    def repeat(self, n: int) -> "RepeatGF[R]":
         return RepeatGF(self, n)
-
 
 class Distribution(GenPrimitive):
     PHANTOM_KEY = jax.random.key(987654321)
@@ -133,7 +132,6 @@ class KeySplitP(jx.core.Primitive):
 
 KeySplit = KeySplitP()
 GenSymT = Callable[[jax.core.AbstractValue], jx.core.Var]
-InAxesT = int | Sequence[Any] | None
 
 
 # %%
@@ -143,6 +141,10 @@ class Gen[R]:
 
     def __call__(self, *args) -> "GF[R]":
         return GF(self.f, args)
+
+    def vmap(self, in_axes: InAxesT = 0) -> Callable[..., "VmapGF[R]"]:
+        return Vmap(self, in_axes=in_axes)
+
 
 
 # TODO: we need to separate the GFI From GF here.
@@ -166,10 +168,6 @@ class GF[R](GFI[R]):
     def concrete(self, *args, at: str):
         v = jax.core.eval_jaxpr(self.jaxpr.jaxpr, self.jaxpr.consts, *args)
         return v if self.multiple_results else v[0]
-
-    # TODO: see if we can unify these two: if we're given any args, use them, else use the stored args?
-    def simulate(self, key: PRNGKeyArray) -> dict:
-        return self.simulate_p(key, self.args)
 
     def simulate_p(self, key: PRNGKeyArray, arg_tuple: tuple) -> dict:
         return Simulate(key).run(self.jaxpr, arg_tuple)
@@ -261,7 +259,7 @@ class Simulate(Transformation[dict]):
         if eqn.primitive is jax.lax.cond_p:
             self.key, sub_key = KeySplit.bind(self.key, a="cond_p")
             branches = bind_params["branches"]
-            avals = [v.aval for v in eqn.invars[1:]]
+            avals = [jax.core.get_aval(p) for p in params[1:]]
 
             transformed = list(
                 map(
@@ -370,7 +368,7 @@ def Scan(gf: Gen):
 
 class RepeatGF[R](GFI[R]):
     def __init__(self, gfi: GFI[R], n: int):
-        super().__init__(f"Repeat[{gfi.name}]")
+        super().__init__(f"Repeat[{gfi.name}, {n}]")
         self.gfi = gfi
         self.n = n
 
@@ -384,17 +382,10 @@ class RepeatGF[R](GFI[R]):
         # this is called after the simulate transformation so the key is the first argument
         return self.simulate_p(args[0], args[1:])
 
-
-    def simulate(self, key: PRNGKeyArray) -> dict:
-        return self.simulate_p(key, self.gfi.get_args())
-
     def simulate_p(self, key: PRNGKeyArray, arg_tuple) -> dict:
         return jax.vmap(jax.custom_batching.sequential_vmap(self.gfi.simulate_p), in_axes=(0, None))(
             jax.random.split(key, self.n), arg_tuple
         )
-        # return jax.vmap(self.gfi.simulate_p, in_axes=(0, None))(
-        #     jax.random.split(key, self.n), arg_tuple
-        # )
 
     def __matmul__(self, address: str) -> R:
         return self.bind(*self.gfi.get_args(), at=address)
@@ -402,15 +393,83 @@ class RepeatGF[R](GFI[R]):
     def get_args(self) -> tuple:
         return self.gfi.get_args()
 
+class VmapGF[R](GFI[R]):
+    def __init__(self, name, jaxpr: jx.core.ClosedJaxpr, arg_tuple: tuple, in_axes: InAxesT):
+        super().__init__(f"Vmap[{name}]")
+        if in_axes is None or in_axes == ():
+            raise NotImplementedError("must specify at least one argument/axis for Vmap")
+        self.arg_tuple = arg_tuple
+        self.in_axes = in_axes
+        self.jaxpr = jaxpr
+        # find one pair of (parameter number, axis) to use to determine size of vmap
+        if isinstance(self.in_axes, tuple):
+            self.p_index, self.an_axis = next(filter(lambda b: b[1] is not None, enumerate(self.in_axes)))
+        else:
+            self.p_index, self.an_axis = 0, self.in_axes
+
+    def simulate_p(self, key: PRNGKeyArray, arg_tuple: tuple) -> dict:
+        n = arg_tuple[self.p_index].shape[self.an_axis]
+        def inner(k: PRNGKeyArray, arg_tuple):
+            return Simulate(k).run(self.jaxpr, arg_tuple)
+        return jax.vmap(jax.custom_batching.sequential_vmap(inner), in_axes=(0, self.in_axes))(
+            jax.random.split(key, n),
+            arg_tuple
+        )
+
+    def get_args(self) -> tuple:
+        return self.arg_tuple
+
+
+def Vmap(g: Gen, in_axes: InAxesT = 0):
+    # maybe make this a class; I don't know yet
+    if in_axes is None:
+        raise NotImplementedError("Cannot vmap over None")
+
+    def reduced_avals(arg_tuple):
+        # if in_axes is not an tuple, lift it to the same shape as arg tuple
+        if isinstance(in_axes, int):
+            ia = jax.tree.map(lambda _: in_axes, arg_tuple)
+        else:
+            ia = in_axes
+        print(f'in_axes {in_axes} ia {ia}')
+        # Now produce an abstract arg tuple in which the shape of the
+        # arrays is contracted in those position where vmap would expect
+        # to find a mapping axis
+        def deflate(array, axis):
+            if axis is None:
+                return array
+            aval = jax.core.get_aval(array)
+            # delete the indicated axes from teh shape tuple
+            print(f'array {array} axis {axis} aval {aval}')
+            assert isinstance(aval, jax.core.ShapedArray)
+            return aval.update(shape=aval.shape[:axis] + aval.shape[axis+1:])
+
+        return jax.tree.map(deflate, arg_tuple, ia)
+
+
+    def ctor(*args):
+        # we need to get a JAXPR for the un-vmapped GF inside, so that we can
+        # perform a simulate transform on it. But the only arguments we'll ever
+        # see are the vectorized arguments, which is why this is tricky.
+        r_avals = reduced_avals(args)
+        print(f'r_avals {r_avals}')
+        j = jax.make_jaxpr(g.f)(*r_avals)
+        print(f'jaxpr {j}')
+        v = VmapGF(g.f.__name__, j, args, in_axes)
+        print(f'v {v}')
+        return v
+
+    return ctor
+
+
+
+
 
 class MapGF[R, S](GFI[S]):
     def __init__(self, gfi: GFI[R], f: Callable[[R], S]):
         super().__init__(f"Map[{gfi.name}, {f.__name__}]")
         self.gfi = gfi
         self.f = f
-
-    def simulate(self, key: PRNGKeyArray) -> dict:
-        return self.simulate_p(key, self.gfi.get_args())
 
     def simulate_p(self, key: PRNGKeyArray, arg_tuple: tuple) -> dict:
         v = self.gfi.simulate_p(key, arg_tuple)
@@ -424,29 +483,8 @@ class MapGF[R, S](GFI[S]):
         return self.gfi.get_args()
 
 
-def Vmap(g: Gen, in_axes: InAxesT = 0):
-    """Note: this Vmap, while it looks like it might sort-of work, is not
-    doing the right thing. Randomness is not propagated along with the
-    batch, for one thing. Idea for now is to work at GFI time, so
-    that we store the information we need, and then adjust simulate
-    be a batched simulate."""
-
-    def ctor(*args):
-        class Binder:
-            def __matmul__(self, address: str):
-                return jax.vmap(lambda *args: g(*args) @ address, in_axes=in_axes)(
-                    *args
-                )
-
-            def simulate(self, key: PRNGKeyArray):
-                @Gen
-                def inner():
-                    return self @ "__vmap"
-
-                return inner().simulate(key)
-
-        return Binder()
-
-    return ctor
-
+# %%
+ia = (0, (0, 0))
+a = (10, (20, 30))
+jax.tree.map(lambda a, b: print(f'a {a} b {b}'), a, ia)
 # %%
