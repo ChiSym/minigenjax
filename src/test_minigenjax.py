@@ -368,10 +368,14 @@ def test_map_of_repeat():
 
     tr = pg.simulate(key0)
     assert jnp.allclose(
-        tr["retval"].coefficients, jnp.array([-0.13994414, -0.7519509, -0.31980208])
+        tr["retval"].coefficients, jnp.array([-0.37148237, 1.1890742, -0.6553323])
     )
-    assert jnp.allclose(tr["retval"](1.0), jnp.array(-1.2116971))
-    assert jnp.allclose(tr["retval"](2.0), jnp.array(-2.9230543))
+    assert jnp.allclose(tr["retval"](1.0), jnp.array(0.16225946))
+    assert jnp.allclose(tr["retval"](2.0), jnp.array(-0.61466336))
+
+    kg = coefficient().repeat(3).map(jnp.sum)
+    tr = kg.simulate(key0)
+    assert jnp.allclose(tr["retval"], jnp.array([0.16225946]))
 
 
 def test_repeat_of_map():
@@ -383,15 +387,17 @@ def test_repeat_of_map():
 
     tr = mr.simulate(key0)
     assert jnp.allclose(
-        tr["retval"], jnp.array([19.966385, 20.016861, 20.021904, 20.22247, 19.879295])
+        tr["retval"], jnp.array([20.071547, 20.081505, 19.934692, 19.985865, 20.004135])
     )
 
 
-@pytest.mark.skip(reason="possible bug in JAX preventing this from working")
+# @pytest.mark.skip(reason="possible bug in JAX preventing this from working")
 def test_repeat_of_cond():
-    repeated_model = cond_model(60.0).repeat(6)
+    repeated_model = cond_model(60.0).repeat(5)
     tr = repeated_model.simulate(key0)
-    assert jnp.allclose(tr["retval"], jnp.array([1.0]))
+    assert jnp.allclose(
+        tr["retval"], jnp.array([30.571875, 30.681627, 59.978813, 59.962864, 30.644602])
+    )
 
 
 def test_vmap():

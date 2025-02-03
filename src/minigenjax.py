@@ -61,6 +61,9 @@ class GFI[R](GenPrimitive):
     def repeat(self, n: int) -> "RepeatGF[R]":
         return RepeatGF(self, n)
 
+    def get_jaxpr(self) -> jx.core.ClosedJaxpr:
+        raise NotImplementedError(f"get_jaxpr: {self}")
+
 
 class Distribution(GenPrimitive):
     PHANTOM_KEY = jax.random.key(987654321)
@@ -102,8 +105,6 @@ Normal = Distribution("Normal", tfp.distributions.Normal)
 MvNormalDiag = Distribution("MvNormalDiag", tfp.distributions.MultivariateNormalDiag)
 Uniform = Distribution("Uniform", tfp.distributions.Uniform)
 Flip = Distribution("Bernoulli", lambda p: tfp.distributions.Bernoulli(probs=p))
-# MvNormalDiag = Distribution("MvNormalDiag", tfp.distributions.MultivariateNormalDiag)
-# bug with numpy 2.0
 Categorical = Distribution(
     "Categorical", lambda ls: tfp.distributions.Categorical(logits=ls)
 )
@@ -167,7 +168,7 @@ class GF[R](GFI[R]):
     def abstract(self, *args, at: str, **_kwargs):
         return self.abstract_value
 
-    def concrete(self, *args, at: str):
+    def concrete(self, *args):
         v = jax.core.eval_jaxpr(self.jaxpr.jaxpr, self.jaxpr.consts, *args)
         return v if self.multiple_results else v[0]
 
@@ -179,6 +180,9 @@ class GF[R](GFI[R]):
 
     def get_args(self) -> tuple:
         return self.args
+
+    def get_jaxpr(self) -> jx.core.ClosedJaxpr:
+        return self.jaxpr
 
 
 class Transformation[R]:
@@ -233,7 +237,7 @@ class Simulate(Transformation[dict]):
         self.key = key
         self.trace = {}
 
-    def address_from_branch(sel7f, b: jx.core.ClosedJaxpr):
+    def address_from_branch(self, b: jx.core.ClosedJaxpr):
         """Look at the given JAXPR and find out if it is a single-instruction
         call to a GF traced to an address. If so, return that address. This is
         used to detect when certain JAX primitives (e.g., `scan_p`, `cond_p`)
@@ -252,6 +256,21 @@ class Simulate(Transformation[dict]):
         )(self.S_KEY, in_avals)
 
     def handle_eqn(self, eqn: jx.core.JaxprEqn, params, bind_params):
+        if isinstance(eqn.primitive, RepeatGF):
+            self.key, sub_key = KeySplit.bind(self.key, a="repeat")
+            transformed, shape = self.transform_inner(bind_params["inner"], params)
+            ans = RepeatGF.Simulate(eqn.primitive).bind(
+                sub_key,
+                *params,
+                at=bind_params["at"],
+                n=bind_params["n"],
+                inner=transformed,
+                transform="simulate",
+            )
+            u = jax.tree.unflatten(jax.tree.structure(shape), ans)
+            self.trace[bind_params["at"]] = u["subtraces"]
+            return u["retval"]
+
         if isinstance(eqn.primitive, GenPrimitive):
             self.key, sub_key = KeySplit.bind(self.key, a="gen_p")
             ans = eqn.primitive.simulate_p(sub_key, params)
@@ -373,27 +392,42 @@ class RepeatGF[R](GFI[R]):
         super().__init__(f"Repeat[{gfi.name}, {n}]")
         self.gfi = gfi
         self.n = n
+        self.multiple_results = self.gfi.multiple_results
 
     def abstract(self, *args, **kwargs):
         a = self.gfi.abstract(*args, **kwargs)
-        assert isinstance(a, jax.core.ShapedArray)
         # just because we aren't sure how to deal with structure yet
+        assert isinstance(a, jax.core.ShapedArray)
         return jax.core.ShapedArray((self.n,) + a.shape, a.dtype)
 
-    def concrete(self, *args, **kwargs):
-        # this is called after the simulate transformation so the key is the first argument
-        return self.simulate_p(args[0], args[1:])
-
-    def simulate_p(self, key: PRNGKeyArray, arg_tuple) -> dict:
-        return jax.vmap(
-            jax.custom_batching.sequential_vmap(self.gfi.simulate_p), in_axes=(0, None)
-        )(jax.random.split(key, self.n), arg_tuple)
+    def simulate_p(self, key: PRNGKeyArray, arg_tuple: tuple) -> dict:
+        return GF(lambda: self @ "__repeat", ()).simulate(key)
 
     def __matmul__(self, address: str) -> R:
-        return self.bind(*self.gfi.get_args(), at=address)
+        return self.bind(
+            *self.gfi.get_args(), at=address, n=self.n, inner=self.gfi.get_jaxpr()
+        )
 
     def get_args(self) -> tuple:
         return self.gfi.get_args()
+
+    class Simulate[S](GFI[S]):
+        def __init__(self, r: "RepeatGF[S]"):
+            super().__init__("Repeat.Simulate")
+            self.r = r
+            self.multiple_results = True
+
+        def abstract(self, *args, **kwargs):
+            a = self.r.abstract(*args, **kwargs)
+            return (a, a, a)
+
+        def concrete(self, *args, **kwargs):
+            # this is called after the simulate transformation so the key is the first argument
+            j: jx.core.ClosedJaxpr = kwargs["inner"]
+            return jax.vmap(
+                lambda k: jax.core.eval_jaxpr(j.jaxpr, j.consts, k, *args[1:]),
+                in_axes=(0,),
+            )(jax.random.split(args[0], kwargs["n"]))
 
 
 class VmapGF[R](GFI[R]):
@@ -455,6 +489,11 @@ class MapGF[R, S](GFI[S]):
         self.gfi = gfi
         self.f = f
 
+    def abstract(self, *args, **kwargs):
+        # this can't be right: what about the effect of f? Why isn't it
+        # sufficient to apply f to a tracer to compose the abstraction?
+        return self.gfi.abstract(*args, **kwargs)
+
     def simulate_p(self, key: PRNGKeyArray, arg_tuple: tuple) -> dict:
         v = self.gfi.simulate_p(key, arg_tuple)
         v["retval"] = self.f(v["retval"])
@@ -465,3 +504,9 @@ class MapGF[R, S](GFI[S]):
 
     def get_args(self) -> tuple:
         return self.gfi.get_args()
+
+    def get_jaxpr(self) -> jx.core.ClosedJaxpr:
+        ij = self.gfi.get_jaxpr()
+        return jax.make_jaxpr(
+            lambda args: self.f(*jax.core.eval_jaxpr(ij.jaxpr, ij.consts, *args))
+        )(self.gfi.get_args())
