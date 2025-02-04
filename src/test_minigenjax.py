@@ -3,7 +3,6 @@ import dataclasses
 import jax
 import jax.numpy as jnp
 from .minigenjax import *
-import pytest
 
 
 @Gen
@@ -235,7 +234,6 @@ def test_scan_model():
     )
 
 
-@pytest.mark.skip(reason="jaxpr lowering error")
 def test_curve_model():
     # %%
     @Gen
@@ -254,36 +252,17 @@ def test_curve_model():
         return fork(outlier) @ "y"
 
     tr = curve_model.vmap(in_axes=(0, None))(jnp.arange(-3.0, 3.0), 0.01).simulate(key0)
-    assert jnp.allclose(tr["subtraces"]["outlier"]["retval"], jnp.array([1.0]))
+    assert jnp.allclose(
+        tr["subtraces"]["__vmap"]["outlier"]["retval"], jnp.array([1, 0, 0, 0, 0, 0])
+    )
     assert jnp.allclose(
         tr["retval"],
-        jnp.array([13.833855, 7.8338547, 3.8338544, 1.8338544, 1.8338544, 3.8338544]),
+        jnp.array([12.718444, 7.111631, 2.9043677, 1.1801443, 0.91071, 2.903885]),
     )
 
     tr = curve_model.vmap(in_axes=(None, 0))(
         0.0, jnp.array([0.001, 0.01, 0.1])
     ).simulate(key0)
-
-    # tr2 = curve_model(jnp.arange(0.0, 1.0, 0.1), 0.2).vmap(in_axes=(0, None)).simulate(key0)
-
-    # tr
-    # tricky. we need a constructor to take the parameters, but if we're going to
-    # build the "lying behind" jaxpr, then we need arguments whose shapes are depressed
-    # a notch (but how are we going to do that?)
-
-    # we didn't change the seed in the vmap, so we got "the same curve" at different x values. Looking at the
-    # function in curve_model, we indeed expect that f(-1) == f(2), f(0) == f(1)
-
-    # jax.vmap(lambda x: curve_model(x, 0.2).simulate(key0))(jnp.arange(-3., 3.))
-
-    # curve_model(4, 0.2).simulate(key0)
-    # jax.make_jaxpr(lambda x, k: curve_model(x, 0.2).simulate(k))(1.0, key0)
-    # %%
-    # Not working yet: outlier_model doesn't get batched
-    # jax.vmap(
-    #     lambda k: jax.vmap(
-    #         lambda x: curve_model(x, 0.2).simulate(k)
-    #     )(jnp.arange(-2, 3.)))(jax.random.split(key0, 10))
 
 
 def test_map():
@@ -391,7 +370,6 @@ def test_repeat_of_map():
     )
 
 
-# @pytest.mark.skip(reason="possible bug in JAX preventing this from working")
 def test_repeat_of_cond():
     repeated_model = cond_model(60.0).repeat(5)
     tr = repeated_model.simulate(key0)
@@ -415,17 +393,18 @@ def test_vmap():
 
     assert jnp.allclose(
         tr0["retval"],
-        jnp.array([0.99663836, 2.001686, 3.0021904, 4.022247, 4.98793]),
+        jnp.array([1.0071547, 2.0081506, 2.9934692, 3.9985867, 5.0004134]),
     )
     tr1 = model.vmap(in_axes=(None, 0))(5.0, jnp.arange(0.1, 0.4, 0.1)).simulate(key0)
     assert jnp.allclose(
-        tr1["retval"], jnp.array([5.1009574, 5.209491, 5.2954764, 5.4029465])
+        tr1["retval"], jnp.array([5.077494, 5.204761, 5.305936, 5.4117436])
     )
     tr2 = model.vmap(in_axes=(0, 0))(
         jnp.arange(5.0), 0.1 * (1.0 + jnp.arange(5.0))
     ).simulate(key0)
     assert jnp.allclose(
-        tr2["retval"], jnp.array([0.09663837, 1.2016861, 2.3021903, 3.422247, 4.48793])
+        tr2["retval"],
+        jnp.array([0.10715472, 1.2081504, 2.2934692, 3.3985865, 4.5004134]),
     )
     # try the above without enumerating axis/arguments in in_axes
     tr3 = model.vmap()(jnp.arange(5.0), 0.1 * (1.0 + jnp.arange(5.0))).simulate(key0)
