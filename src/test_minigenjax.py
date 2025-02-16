@@ -2,6 +2,7 @@
 import dataclasses
 import jax
 import jax.numpy as jnp
+import pytest
 from .minigenjax import *
 
 
@@ -36,16 +37,16 @@ key0 = jax.random.PRNGKey(0)
 # %%
 def test_normal_model():
     tr = model1(10.0).simulate(key0)
-    assert tr == {
+    expected = {
         "retval": 9.874846,
         "subtraces": {
             "x": {
-                "retval": 9.874846,
-                "score": 0.60047853,
+                "retval": jnp.array(9.874846),
+                "score": jnp.array(0.60047853),
             }
         },
     }
-
+    assert tr == expected
 
 def test_uniform_model():
     tr = model2(20.0).simulate(key0)
@@ -376,7 +377,6 @@ def test_repeat_of_cond():
     assert jnp.allclose(
         tr["retval"], jnp.array([30.571875, 30.681627, 59.978813, 59.962864, 30.644602])
     )
-
 
 def test_vmap():
     @Gen

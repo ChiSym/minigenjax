@@ -263,7 +263,7 @@ class Simulate(Transformation[dict]):
             self.key, sub_key = KeySplit.bind(self.key, a="repeat")
             transformed, shape = self.transform_inner(bind_params["inner"], params)
             new_params = bind_params | {"inner": transformed}
-            ans = eqn.primitive.Simulate(eqn.primitive).bind(
+            ans = eqn.primitive.Simulate(eqn.primitive, shape).bind(
                 sub_key, *params, **new_params
             )
             u = jax.tree.unflatten(jax.tree.structure(shape), ans)
@@ -276,7 +276,7 @@ class Simulate(Transformation[dict]):
                 bind_params["inner"], eqn.primitive.reduced_avals(params)
             )
             new_params = bind_params | {"inner": transformed}
-            ans = VmapGF.Simulate(eqn.primitive).bind(sub_key, *params, **new_params)
+            ans = eqn.primitive.Simulate(eqn.primitive, shape).bind(sub_key, *params, **new_params)
             u = jax.tree.unflatten(jax.tree.structure(shape), ans)
             self.trace[bind_params["at"]] = u["subtraces"]
             return u["retval"]
@@ -312,6 +312,8 @@ class Simulate(Transformation[dict]):
                 # flatten out an extra layer of subtraces
                 self.trace[address] = u["subtraces"][address]
                 ans = [u["retval"]]
+            else:
+                raise Exception(f'missing address in {eqn}')
             return ans
 
         if eqn.primitive is jax.lax.scan_p:
@@ -344,6 +346,8 @@ class Simulate(Transformation[dict]):
                 u = jax.tree.unflatten(jax.tree.structure(shape), ans[1:])
                 self.trace[address] = u["subtraces"][address]
                 ans = u["retval"]
+            else:
+                raise Exception(f'missing address in {eqn}')
 
             return ans
 
@@ -414,7 +418,6 @@ class RepeatGF[R](GFI[R]):
         return GF(lambda: self @ "__repeat", ()).simulate(key)
 
     def __matmul__(self, address: str) -> R:
-        print(f"self.gfi = {self.gfi}, {self.gfi.get_jaxpr}")
         return self.bind(
             *self.gfi.get_args(), at=address, n=self.n, inner=self.gfi.get_jaxpr()
         )
@@ -423,14 +426,14 @@ class RepeatGF[R](GFI[R]):
         return self.gfi.get_args()
 
     class Simulate[S](GFI[S]):
-        def __init__(self, r: "RepeatGF[S]"):
+        def __init__(self, r: "RepeatGF[S]", shape: Any):
             super().__init__("Repeat.Simulate")
             self.r = r
+            self.shape = shape
             self.multiple_results = True
 
         def abstract(self, *args, **kwargs):
-            a = self.r.abstract(*args, **kwargs)
-            return (a, a, a)
+            return [jax.core.get_aval(s) for s in jax.tree.flatten(self.shape)[0]]
 
         def concrete(self, *args, **kwargs):
             # this is called after the simulate transformation so the key is the first argument
@@ -493,39 +496,23 @@ class VmapGF[R](GFI[R]):
             *self.arg_tuple, at=address, in_axes=self.in_axes, inner=self.jaxpr
         )
 
-    # def simulate_p(self, key: PRNGKeyArray, arg_tuple: tuple) -> dict:
-    #     n = arg_tuple[self.p_index].shape[self.an_axis]
-
-    #     def inner(k: PRNGKeyArray, arg_tuple):
-    #         return Simulate(k).run(self.jaxpr, arg_tuple)
-
-    #     return jax.vmap(
-    #         jax.custom_batching.sequential_vmap(inner), in_axes=(0, self.in_axes)
-    #     )(jax.random.split(key, n), arg_tuple)
-
     def get_args(self) -> tuple:
         return self.arg_tuple
 
     class Simulate[S](GFI[S]):
-        def __init__(self, r: "VmapGF[S]"):
+        def __init__(self, r: "VmapGF[S]", shape: Any): # TODO: PyTreeDef?
             super().__init__("Vmap.Simulate")
             self.r = r
+            self.shape = shape
             self.multiple_results = True
 
         def abstract(self, *args, **kwargs):
-            a = self.r.abstract(*args, **kwargs)
-            return (a, a, a)
+            return [jax.core.get_aval(s) for s in jax.tree.flatten(self.shape)[0]]
 
         def concrete(self, *args, **kwargs):
             # this is called after the simulate transformation so the key is the first argument
             n = self.r.arg_tuple[self.r.p_index].shape[self.r.an_axis]
             j: jx.core.ClosedJaxpr = kwargs["inner"]
-            print(
-                f"about to vmap n={n} ia={(0, self.r.in_axes)} at={self.r.arg_tuple} "
-            )
-            print(f"args = {args}")
-            print(f"inner jaxpr = {j}")
-            print(f"jaxpr = {self.r.jaxpr}")
             return jax.vmap(
                 lambda k, arg_tuple: jax.core.eval_jaxpr(
                     j.jaxpr, j.consts, k, *arg_tuple
