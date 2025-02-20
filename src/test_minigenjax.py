@@ -2,7 +2,6 @@
 import dataclasses
 import jax
 import jax.numpy as jnp
-import pytest
 from .minigenjax import *
 
 
@@ -47,6 +46,7 @@ def test_normal_model():
         },
     }
     assert tr == expected
+
 
 def test_uniform_model():
     tr = model2(20.0).simulate(key0)
@@ -378,6 +378,7 @@ def test_repeat_of_cond():
         tr["retval"], jnp.array([30.571875, 30.681627, 59.978813, 59.962864, 30.644602])
     )
 
+
 def test_vmap():
     @Gen
     def model(x, y):
@@ -410,6 +411,7 @@ def test_vmap():
     tr3 = model.vmap()(jnp.arange(5.0), 0.1 * (1.0 + jnp.arange(5.0))).simulate(key0)
     assert jnp.allclose(tr3["retval"], tr2["retval"])
 
+
 def test_assess():
     @jax.tree_util.register_dataclass
     @dataclasses.dataclass
@@ -419,16 +421,18 @@ def test_assess():
 
     @Gen
     def p():
-        x = Normal(0.0, 1.0) @ 'x'
-        y = Normal(0.0, 1.0) @ 'y'
+        x = Normal(0.0, 1.0) @ "x"
+        y = Normal(0.0, 1.0) @ "y"
         return Point(x, y)
 
     @Gen
     def q():
-        return p() @ 'p'
+        return p() @ "p"
 
-    constraints = {('x',): 2.0, ('y',): 2.1}
-    w = p().assess(lambda a: constraints[a])
+    constraints = {"x": 2.0, "y": 2.1}
+    w = p().assess(constraints)
+    assert w == -6.0428767
+    w = q().assess({"p": constraints})
     assert w == -6.0428767
 
 

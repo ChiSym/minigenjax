@@ -1,4 +1,5 @@
 # %%
+import functools
 from typing import Any, Callable, Sequence
 import tensorflow_probability.substrates.jax as tfp
 import jax
@@ -39,7 +40,9 @@ class GenPrimitive(jx.core.Primitive):
         raise NotImplementedError(f"simulate_p: {self}")
 
     # TODO: type of constraint?
-    def assess_p(self, arg_tuple: tuple, constraint) -> Array:
+    def assess_p(
+        self, arg_tuple: tuple, constraint, base_address: tuple[str, ...]
+    ) -> tuple[Array, Array]:
         raise NotImplementedError(f"assess_p: {self}")
 
 
@@ -54,7 +57,7 @@ class GFI[R](GenPrimitive):
         return self.simulate_p(key, self.get_args())
 
     def assess(self, constraint) -> Array:
-        return self.assess_p(self.get_args(), constraint)
+        return self.assess_p(self.get_args(), constraint, ())[1]
 
     def __matmul__(self, address: str) -> R:
         raise NotImplementedError(f"{self} @ {address}")
@@ -182,8 +185,12 @@ class GF[R](GFI[R]):
     def simulate_p(self, key: PRNGKeyArray, arg_tuple: tuple) -> dict:
         return Simulate(key).run(self.jaxpr, arg_tuple)
 
-    def assess_p(self, arg_tuple: tuple, constraint) -> Array:
-        return Assess(constraint).run(self.jaxpr, arg_tuple)
+    def assess_p(
+        self, arg_tuple: tuple, constraint, base_address
+    ) -> tuple[Array, Array]:
+        a = Assess(constraint, base_address)
+        value = a.run(self.jaxpr, arg_tuple)
+        return value, a.score
 
     def __matmul__(self, address: str):
         return self.bind(*self.args, at=address)
@@ -239,32 +246,37 @@ class Transformation[R]:
     def construct_retval(self, retval) -> R:
         return retval
 
-class Assess(Transformation[Array]):
 
-    def __init__(self, constraint):
+class Assess(Transformation[Array]):
+    def __init__(
+        self, constraint: dict[tuple[str, ...], Array], address: tuple[str, ...]
+    ):
         self.constraint = constraint
-        self.address = ()
+        self.address = address
         self.score = jnp.array(0.0)
 
+    def apply_constraint(self, addr):
+        if isinstance(self.constraint, dict):
+            return functools.reduce(lambda d, a: d[a], addr, self.constraint)
+        else:
+            return self.constraint(addr)
+
     def handle_eqn(self, eqn: jx.core.JaxprEqn, params, bind_params):
+        addr = self.address + (bind_params["at"],)
         if isinstance(eqn.primitive, Distribution):
-            at = bind_params['at']
-            addr = self.address + (at,)
-            v = self.constraint(addr)
+            v = self.apply_constraint(addr)
             self.score += eqn.primitive.bind(v, *params[1:], op="Score")
             return v
 
         if isinstance(eqn.primitive, GenPrimitive):
-            ans = eqn.primitive.assess_p(params, self.constraint)
-            return ans["retval"]
+            ans, score = eqn.primitive.assess_p(params, self.constraint, addr)
+            self.score += score
+            return ans
 
         return super().handle_eqn(eqn, params, bind_params)
 
     def construct_retval(self, retval) -> Array:
         return self.score
-
-
-
 
 
 class Simulate(Transformation[dict]):
@@ -313,7 +325,9 @@ class Simulate(Transformation[dict]):
                 bind_params["inner"], eqn.primitive.reduced_avals(params)
             )
             new_params = bind_params | {"inner": transformed}
-            ans = eqn.primitive.Simulate(eqn.primitive, shape).bind(sub_key, *params, **new_params)
+            ans = eqn.primitive.Simulate(eqn.primitive, shape).bind(
+                sub_key, *params, **new_params
+            )
             u = jax.tree.unflatten(jax.tree.structure(shape), ans)
             self.trace[bind_params["at"]] = u["subtraces"]
             return u["retval"]
@@ -350,7 +364,7 @@ class Simulate(Transformation[dict]):
                 self.trace[address] = u["subtraces"][address]
                 ans = [u["retval"]]
             else:
-                raise Exception(f'missing address in {eqn}')
+                raise Exception(f"missing address in {eqn}")
             return ans
 
         if eqn.primitive is jax.lax.scan_p:
@@ -384,7 +398,7 @@ class Simulate(Transformation[dict]):
                 self.trace[address] = u["subtraces"][address]
                 ans = u["retval"]
             else:
-                raise Exception(f'missing address in {eqn}')
+                raise Exception(f"missing address in {eqn}")
 
             return ans
 
@@ -537,7 +551,7 @@ class VmapGF[R](GFI[R]):
         return self.arg_tuple
 
     class Simulate[S](GFI[S]):
-        def __init__(self, r: "VmapGF[S]", shape: Any): # TODO: PyTreeDef?
+        def __init__(self, r: "VmapGF[S]", shape: Any):  # TODO: PyTreeDef?
             super().__init__("Vmap.Simulate")
             self.r = r
             self.shape = shape
