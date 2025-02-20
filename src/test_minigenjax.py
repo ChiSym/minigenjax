@@ -410,5 +410,26 @@ def test_vmap():
     tr3 = model.vmap()(jnp.arange(5.0), 0.1 * (1.0 + jnp.arange(5.0))).simulate(key0)
     assert jnp.allclose(tr3["retval"], tr2["retval"])
 
+def test_assess():
+    @jax.tree_util.register_dataclass
+    @dataclasses.dataclass
+    class Point:
+        x: jax.Array
+        y: jax.Array
+
+    @Gen
+    def p():
+        x = Normal(0.0, 1.0) @ 'x'
+        y = Normal(0.0, 1.0) @ 'y'
+        return Point(x, y)
+
+    @Gen
+    def q():
+        return p() @ 'p'
+
+    constraints = {('x',): 2.0, ('y',): 2.1}
+    w = p().assess(lambda a: constraints[a])
+    assert w == -6.0428767
+
 
 # %%

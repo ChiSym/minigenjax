@@ -7,7 +7,7 @@ import jax.numpy as jnp
 from jax.interpreters import batching, mlir
 import jax.extend as jx
 import jax.core
-from jaxtyping import PRNGKeyArray
+from jaxtyping import Array, PRNGKeyArray
 
 
 # %%
@@ -38,6 +38,10 @@ class GenPrimitive(jx.core.Primitive):
     def simulate_p(self, key: PRNGKeyArray, arg_tuple: tuple) -> dict:
         raise NotImplementedError(f"simulate_p: {self}")
 
+    # TODO: type of constraint?
+    def assess_p(self, arg_tuple: tuple, constraint) -> Array:
+        raise NotImplementedError(f"assess_p: {self}")
+
 
 InAxesT = int | Sequence[Any] | None
 
@@ -48,6 +52,9 @@ class GFI[R](GenPrimitive):
 
     def simulate(self, key: PRNGKeyArray) -> dict:
         return self.simulate_p(key, self.get_args())
+
+    def assess(self, constraint) -> Array:
+        return self.assess_p(self.get_args(), constraint)
 
     def __matmul__(self, address: str) -> R:
         raise NotImplementedError(f"{self} @ {address}")
@@ -117,8 +124,8 @@ class KeySplitP(jx.core.Primitive):
         super().__init__("KeySplit")
 
         def impl(k, a=None):
-            rval = jax.random.split(k, 2)
-            return rval[0], rval[1]
+            r = jax.random.split(k, 2)
+            return r[0], r[1]
 
         self.def_impl(impl)
         self.multiple_results = True
@@ -175,6 +182,9 @@ class GF[R](GFI[R]):
     def simulate_p(self, key: PRNGKeyArray, arg_tuple: tuple) -> dict:
         return Simulate(key).run(self.jaxpr, arg_tuple)
 
+    def assess_p(self, arg_tuple: tuple, constraint) -> Array:
+        return Assess(constraint).run(self.jaxpr, arg_tuple)
+
     def __matmul__(self, address: str):
         return self.bind(*self.args, at=address)
 
@@ -208,9 +218,9 @@ class Transformation[R]:
         jax.util.safe_map(write, jaxpr.invars, arg_tuple)
 
         for eqn in jaxpr.eqns:
-            subfuns, bind_params = eqn.primitive.get_bind_params(eqn.params)
-            if subfuns:
-                raise NotImplementedError("nonempty subfuns")
+            sub_fns, bind_params = eqn.primitive.get_bind_params(eqn.params)
+            if sub_fns:
+                raise NotImplementedError("nonempty sub_fns")
             # name_stack = source_info_util.current_name_stack() + eqn.source_info.name_stack
             # traceback = eqn.source_info.traceback if propagate_source_info else None
             # with source_info_util.user_context(
@@ -222,12 +232,39 @@ class Transformation[R]:
             else:
                 write(eqn.outvars[0], ans)
             # clean_up_dead_vars(eqn, env, lu)
-        retvals = jax.util.safe_map(read, jaxpr.outvars)
-        retval = retvals if len(jaxpr.outvars) > 1 else retvals[0]
+        retval = jax.util.safe_map(read, jaxpr.outvars)
+        retval = retval if len(jaxpr.outvars) > 1 else retval[0]
         return self.construct_retval(retval)
 
     def construct_retval(self, retval) -> R:
         return retval
+
+class Assess(Transformation[Array]):
+
+    def __init__(self, constraint):
+        self.constraint = constraint
+        self.address = ()
+        self.score = jnp.array(0.0)
+
+    def handle_eqn(self, eqn: jx.core.JaxprEqn, params, bind_params):
+        if isinstance(eqn.primitive, Distribution):
+            at = bind_params['at']
+            addr = self.address + (at,)
+            v = self.constraint(addr)
+            self.score += eqn.primitive.bind(v, *params[1:], op="Score")
+            return v
+
+        if isinstance(eqn.primitive, GenPrimitive):
+            ans = eqn.primitive.assess_p(params, self.constraint)
+            return ans["retval"]
+
+        return super().handle_eqn(eqn, params, bind_params)
+
+    def construct_retval(self, retval) -> Array:
+        return self.score
+
+
+
 
 
 class Simulate(Transformation[dict]):
@@ -319,7 +356,7 @@ class Simulate(Transformation[dict]):
         if eqn.primitive is jax.lax.scan_p:
             self.key, sub_key = KeySplit.bind(self.key, a="scan_p")
             inner = bind_params["jaxpr"]
-            # at this point params contains (init, xs). We want to simify with
+            # at this point params contains (init, xs). We want to simulate with
             # (carry, x) i.e. (init, xs[0])
             xs_aval = eqn.invars[1].aval
             assert isinstance(xs_aval, jax.core.ShapedArray)
@@ -327,7 +364,7 @@ class Simulate(Transformation[dict]):
             scan_avals = [eqn.invars[0].aval, x_aval]
             transformed_inner, shape = self.transform_inner(inner, scan_avals)
             inner_jaxpr = transformed_inner.jaxpr
-            # simmed_inner is nice but in the scan context we need to return the
+            # transformed_inner is nice but in the scan context we need to return the
             # new root key among the return values
             transformed_inner = transformed_inner.replace(
                 jaxpr=inner_jaxpr.replace(
@@ -342,7 +379,7 @@ class Simulate(Transformation[dict]):
             }
             ans = eqn.primitive.bind(sub_key, *params, **new_bind_params)
             if address := self.address_from_branch(inner):
-                # drop returned key from the unflattening part
+                # drop returned key from what we unflatten
                 u = jax.tree.unflatten(jax.tree.structure(shape), ans[1:])
                 self.trace[address] = u["subtraces"][address]
                 ans = u["retval"]
@@ -366,12 +403,12 @@ def Cond(tf, ff):
     argument which will switch between the true and false branches."""
 
     def ctor(pred):
-        pred_asint = jnp.int32(pred)
+        pred_as_int = jnp.int32(pred)
 
         class Binder:
             def __matmul__(self, address: str):
                 return jax.lax.switch(
-                    pred_asint, [lambda: ff @ address, lambda: tf @ address]
+                    pred_as_int, [lambda: ff @ address, lambda: tf @ address]
                 )
 
             def simulate(self, key: PRNGKeyArray):
@@ -460,7 +497,7 @@ class VmapGF[R](GFI[R]):
             )
         else:
             self.p_index, self.an_axis = 0, self.in_axes
-        # Compute the "scalar" jaxpr by feeding the un-vmapped arguments to make_jaxpr
+        # Compute the "scalar" jaxpr by feeding the un-v-mapped arguments to make_jaxpr
         self.jaxpr, self.shape = jax.make_jaxpr(g.f, return_shape=True)(
             *self.reduced_avals(arg_tuple)
         )
