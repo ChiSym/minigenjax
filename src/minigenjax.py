@@ -121,7 +121,9 @@ Categorical = Distribution(
 
 
 class KeySplitP(jx.core.Primitive):
-    KEY_TYPE = jax.core.ShapedArray((2,), jnp.uint32)
+    KEY_TYPE = jax.core.get_aval(
+        jax.random.key(0)
+    )  # jax.core.ShapedArray((2,), jnp.uint32)
 
     def __init__(self):
         super().__init__("KeySplit")
@@ -132,7 +134,9 @@ class KeySplitP(jx.core.Primitive):
 
         self.def_impl(impl)
         self.multiple_results = True
-        self.def_abstract_eval(lambda _, a=None: [self.KEY_TYPE, self.KEY_TYPE])
+        self.def_abstract_eval(
+            lambda _, a=None: [KeySplitP.KEY_TYPE, KeySplitP.KEY_TYPE]
+        )
 
         mlir.register_lowering(self, mlir.lower_fun(self.impl, self.multiple_results))
 
@@ -277,7 +281,7 @@ class Assess(Transformation[Array]):
 
 
 class Simulate(Transformation[dict]):
-    S_KEY = jax.random.PRNGKey(99999)
+    S_KEY = jax.random.key(99999)
 
     def __init__(self, key: PRNGKeyArray):
         self.key = key
@@ -358,37 +362,19 @@ class Simulate(Transformation[dict]):
         if eqn.primitive is jax.lax.scan_p:
             self.key, sub_key = KeySplit.bind(self.key, a="scan_p")
             inner = bind_params["jaxpr"]
-            # at this point params contains (init, xs). We want to simulate with
-            # (carry, x) i.e. (init, xs[0])
-            xs_aval = eqn.invars[1].aval
-            assert isinstance(xs_aval, jax.core.ShapedArray)
-            x_aval = xs_aval.update(shape=xs_aval.shape[1:])
-            scan_avals = [eqn.invars[0].aval, x_aval]
-            transformed_inner, shape = self.transform_inner(inner, scan_avals)
-            inner_jaxpr = transformed_inner.jaxpr
-            # transformed_inner is nice but in the scan context we need to return the
-            # new root key among the return values
-            transformed_inner = transformed_inner.replace(
-                jaxpr=inner_jaxpr.replace(
-                    outvars=inner_jaxpr.eqns[0].outvars[:1] + inner_jaxpr.outvars,
-                    debug_info=None,
-                )
-            )
-            new_bind_params = bind_params | {
-                "jaxpr": transformed_inner,
-                "linear": (False,) + bind_params["linear"],
-                "num_carry": bind_params["num_carry"] + 1,
-            }
-            ans = eqn.primitive.bind(sub_key, *params, **new_bind_params)
-            if address := self.address_from_branch(inner):
-                # drop returned key from what we unflatten
-                u = jax.tree.unflatten(jax.tree.structure(shape), ans[1:])
-                self.trace[address] = u["subtraces"][address]
-                ans = u["retval"]
-            else:
-                raise Exception(f"missing address in {eqn}")
 
-            return ans
+            def step(carry_key, s):
+                carry, key = carry_key
+                key, k1 = KeySplit.bind(key, a="scan_step")
+                v = Simulate(k1).run(inner, (carry, s))
+                return ((v["retval"][0], key), v)
+
+            ans = jax.lax.scan(step, (params[0], sub_key), params[1])
+            if address := self.address_from_branch(inner):
+                self.trace[address] = ans[1]["subtraces"][address]
+
+            # we extended the carry with the key; now drop it
+            return (ans[0][0], ans[1]["retval"][1])
 
         return super().handle_eqn(eqn, params, bind_params)
 

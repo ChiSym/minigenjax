@@ -30,7 +30,7 @@ def cond_model(b):
     return y
 
 
-key0 = jax.random.PRNGKey(0)
+key0 = jax.random.key(0)
 
 
 # %%
@@ -212,7 +212,7 @@ def test_ordinary_cond():
         n = Normal(0.0, 1.0) @ "n"
         return jax.lax.cond(n > 0, lambda: n, lambda: 10 * n)
 
-    tr = f().simulate(jax.random.key(0))
+    tr = f().simulate(key0)
     assert tr["retval"] == -12.5153885
     assert tr["subtraces"]["n"]["retval"] == -1.2515389
 
@@ -229,7 +229,7 @@ def test_intervening_functions():
     def f():
         return g() @ "g"
 
-    tr = f().simulate(jax.random.key(0))
+    tr = f().simulate(key0)
     assert tr["retval"] == 1.2767134
     assert tr["subtraces"]["g"]["retval"] == tr["retval"]
 
@@ -248,19 +248,34 @@ def test_scan_model():
     # jax.make_jaxpr(scan_update().simulate)(key0)
 
     tr = scan_update().simulate(key0)
-    assert jnp.allclose(tr["retval"][0], 11.494305)
+    assert jnp.allclose(tr["retval"][0], 11.497978)
     assert jnp.allclose(
         tr["retval"][1],
-        jnp.array([10.111384, 10.305588, 10.607706, 11.00557, 11.494305]),
+        jnp.array([10.101994, 10.284705, 10.613012, 10.999251, 11.497978]),
     )
     assert jnp.allclose(
         tr["subtraces"]["S"]["subtraces"]["drift"]["retval"],
-        jnp.array([0.11138456, 0.1942033, 0.30211872, 0.39786434, 0.48873404]),
+        jnp.array([0.10199323, 0.18271188, 0.32830706, 0.386239, 0.4987273]),
     )
     assert jnp.allclose(
         tr["subtraces"]["S"]["subtraces"]["drift"]["score"],
-        jnp.array([3.0381901, 3.518223, 3.6637871, 3.6634264, 3.051622]),
+        jnp.array([3.6663668, 2.1918368, -0.3202114, 2.739405, 3.6781328]),
     )
+
+
+def test_plain_scan():
+    @Gen
+    def model(x):
+        init = Normal(x, 0.01) @ "init"
+        return jax.lax.scan(lambda a, b: (a + b, a + b), init, jnp.arange(5.0))
+
+    tr = model(10.0).simulate(key0)
+    assert tr["retval"][0] == 19.987484
+    assert jnp.allclose(
+        tr["retval"][1],
+        jnp.array([9.987485, 10.987485, 12.987485, 15.987485, 19.987484]),
+    )
+    assert tr["subtraces"]["init"]["retval"] == 9.987485
 
 
 def test_curve_model():
