@@ -206,6 +206,34 @@ def test_vmap_over_cond():
     )
 
 
+def test_ordinary_cond():
+    @Gen
+    def f():
+        n = Normal(0.0, 1.0) @ "n"
+        return jax.lax.cond(n > 0, lambda: n, lambda: 10 * n)
+
+    tr = f().simulate(jax.random.key(0))
+    assert tr["retval"] == -12.5153885
+    assert tr["subtraces"]["n"]["retval"] == -1.2515389
+
+
+def test_intervening_functions():
+    @Gen
+    def h():
+        return Normal(0.0, 1.0) @ "n"
+
+    def g():
+        return h()
+
+    @Gen
+    def f():
+        return g() @ "g"
+
+    tr = f().simulate(jax.random.key(0))
+    assert tr["retval"] == 1.2767134
+    assert tr["subtraces"]["g"]["retval"] == tr["retval"]
+
+
 def test_scan_model():
     @Gen
     def update(state, delta):
@@ -413,17 +441,11 @@ def test_vmap():
 
 
 def test_assess():
-    @jax.tree_util.register_dataclass
-    @dataclasses.dataclass
-    class Point:
-        x: jax.Array
-        y: jax.Array
-
     @Gen
     def p():
         x = Normal(0.0, 1.0) @ "x"
         y = Normal(0.0, 1.0) @ "y"
-        return Point(x, y)
+        return x, y
 
     @Gen
     def q():

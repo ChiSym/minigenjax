@@ -275,9 +275,6 @@ class Assess(Transformation[Array]):
 
         return super().handle_eqn(eqn, params, bind_params)
 
-    def construct_retval(self, retval) -> Array:
-        return self.score
-
 
 class Simulate(Transformation[dict]):
     S_KEY = jax.random.PRNGKey(99999)
@@ -341,31 +338,22 @@ class Simulate(Transformation[dict]):
         if eqn.primitive is jax.lax.cond_p:
             self.key, sub_key = KeySplit.bind(self.key, a="cond_p")
             branches = bind_params["branches"]
-            avals = [jax.core.get_aval(p) for p in params[1:]]
 
-            transformed = list(
-                map(
-                    lambda branch: self.transform_inner(branch, avals),
-                    branches,
-                )
+            # TODO: is it OK to pass the same sub_key to both sides?
+            # NB! branches[0] is the false branch, [1] is the true branch,
+            ans = jax.lax.cond(
+                params[0],
+                lambda: Simulate(sub_key).run(branches[1], params[1:]),
+                lambda: Simulate(sub_key).run(branches[0], params[1:]),
             )
-            transformed_branches = tuple(t[0] for t in transformed)
-            shapes = [s[1] for s in transformed]
-            new_bind_params = bind_params | {"branches": transformed_branches}
-            ans = eqn.primitive.bind(params[0], sub_key, *params[1:], **new_bind_params)
 
             branch_addresses = tuple(map(self.address_from_branch, branches))
             if branch_addresses[0] and all(
                 b == branch_addresses[0] for b in branch_addresses[1:]
             ):
                 address = branch_addresses[0]
-                u = jax.tree.unflatten(jax.tree.structure(shapes[0]), ans)
-                # flatten out an extra layer of subtraces
-                self.trace[address] = u["subtraces"][address]
-                ans = [u["retval"]]
-            else:
-                raise Exception(f"missing address in {eqn}")
-            return ans
+                self.trace[address] = ans["subtraces"][address]
+            return [ans["retval"]]
 
         if eqn.primitive is jax.lax.scan_p:
             self.key, sub_key = KeySplit.bind(self.key, a="scan_p")
