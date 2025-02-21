@@ -31,29 +31,32 @@ def cond_model(b):
     y = Cond(model1(b), model2(b / 2.0))(flip) @ "s"
     return y
 
-@Gen
-@staticmethod
-def inlier(y, sigma_inlier):
-    return Normal(y, sigma_inlier) @ "value"
 
 @Gen
 @staticmethod
-def outlier(y):
+def inlier_model(y, sigma_inlier):
+    return Normal(y, sigma_inlier) @ "value"
+
+
+@Gen
+@staticmethod
+def outlier_model(y):
     return Uniform(y - 1.0, y + 1.0) @ "value"
+
 
 @Gen
 @staticmethod
 def curve_model(f, x, p_outlier, sigma_inlier):
     outlier = Flip(p_outlier) @ "outlier"
     y = f(x)
-    fork = Cond(outlier(y), inlier(y, sigma_inlier))
+    fork = Cond(outlier_model(y), inlier_model(y, sigma_inlier))
     return fork(outlier) @ "y"
+
 
 @Gen
 @staticmethod
 def coefficient():
     return Normal(0.0, 1.0) @ "c"
-
 
 
 @jax.tree_util.register_dataclass
@@ -65,7 +68,6 @@ class Poly:
         if not self.coefficients.shape:
             return 0.0
         powers = jnp.pow(x, jnp.arange(len(self.coefficients)))
-        print(f'self.coefs {self.coefficients} powers {powers}')
         return jnp.dot(powers, self.coefficients)
 
     def tree_flatten(self):
@@ -76,8 +78,29 @@ class Poly:
         return cls(*children)
 
 
-
 key0 = jax.random.key(0)
+
+
+def test_pytree():
+    poly = coefficient().repeat(3).map(Poly)
+    tr = poly.simulate(key0)
+    p = tr["retval"]
+    assert jnp.allclose(p.coefficients, jnp.array([-0.37148237, 1.1890742, -0.6553323]))
+
+    @Gen
+    def noisy_eval(f, x):
+        return f(x) + Normal(0.0, 0.01) @ "noise"
+
+    tr = noisy_eval(p, 0.0).simulate(jax.random.key(1))
+    assert tr["retval"] == -0.38295257
+    assert tr["retval"] == p(0.0) + tr["subtraces"]["noise"]["retval"]
+
+    tr = noisy_eval.vmap(in_axes=(None, 0))(p, jnp.arange(-2.0, 2.0)).simulate(
+        jax.random.key(2)
+    )
+    assert jnp.allclose(
+        tr["retval"], jnp.array([-5.361393, -2.220848, -0.36542255, 0.1720068])
+    )
 
 
 # %%
@@ -292,8 +315,6 @@ def test_scan_model():
     def scan_update():
         return Scan(update)(10.0, jnp.arange(0.1, 0.6, 0.1)) @ "S"
 
-    # jax.make_jaxpr(scan_update().simulate)(key0)
-
     tr = scan_update().simulate(key0)
     assert jnp.allclose(tr["retval"][0], 11.497978)
     assert jnp.allclose(
@@ -326,33 +347,15 @@ def test_plain_scan():
 
 
 class TestCurve:
-    # where we left off: we want something applicable we can use
-    # as a parameter to the model. A Python function is not JAX
-    # compatible. So we need a Pytree
-# TODO: we need to separate the GFI From GF here.
-# We need a way for combinators to represent the GFI without
-# necessarily holding a bare python function that computes it.
-#
-# So let's pull the poly class up to the top & use it. rewrite
-
-
-# is something wrong with the rehydration? is it our involvement?
-# maybe something in the interpreter needs to destructure this object
-
-
-    @pytest.mark.skip(reason="not ready yet (flatten/unflatten)")
     def test_curve_model(self):
-        # %%
-
         f = Poly(jnp.array([1.0, -1.0, 2.0]))  # x**2.0 - x + 1.0
 
-        assert f(0.) == 1.
+        assert f(0.0) == 1.0
 
         tr = curve_model(f, 0.0, 0.0, 0.0).simulate(key0)
-        assert tr['retval'] == 1.0
-        assert tr['subtraces']['outlier']['retval'] == 0
-        assert tr['subtraces']['y']['subtraces']['value']['retval'] == 1.0
-
+        assert tr["retval"] == 1.0
+        assert tr["subtraces"]["outlier"]["retval"] == 0
+        assert tr["subtraces"]["y"]["subtraces"]["value"]["retval"] == 1.0
 
         tr = curve_model.vmap(in_axes=(None, 0, None, None))(
             f, jnp.arange(-3.0, 3.0), 0.01, 0.01
@@ -363,20 +366,28 @@ class TestCurve:
         )
         assert jnp.allclose(
             tr["retval"],
-            jnp.array([12.718444, 7.111631, 2.9043677, 1.1801443, 0.91071, 2.903885]),
+            jnp.array(
+                [21.718445, 11.011163, 3.9904368, 1.0180144, 1.991071, 6.9903884]
+            ),
+        )
+        tr = curve_model.vmap(in_axes=(None, None, 0, None))(
+            f, 0.0, jnp.array([0.001, 0.01, 0.9]), 0.3
+        ).simulate(key0)
+        assert jnp.allclose(
+            tr["subtraces"]["__vmap"]["outlier"]["retval"], jnp.array([0, 0, 1])
+        )
+        assert jnp.allclose(
+            tr["retval"], jnp.array([1.1806593, 0.97604936, 0.02672911])
         )
 
-        tr = curve_model.vmap(in_axes=(None, None, 0))(
-            f, 0.0, jnp.array([0.001, 0.01, 0.1]), 0.3
-        ).simulate(key0)
-
-    @pytest.mark.skip(reason="not ready yet (flatten/unflatten)")
     def test_curve_generation(self):
-        quadratic = TestCurve.Poly(coefficient, 2)
-        points = jnp.arange(-1.0, 1.0, 0.1)
-        # tr = jax.vmap(curve(points).simulate)
-        tr = jax.vmap(quadratic().simulate)(jax.random.split(jax.random.key(0), 10))
-        assert tr == "foo"
+        quadratic = coefficient().repeat(3).map(Poly)
+        points = jnp.arange(-3.0, 3.0)
+
+        tr = jax.vmap(quadratic.simulate)(jax.random.split(key0, 10))
+        assert tr["retval"].coefficients.shape == (10, 3)
+        graphs = jax.vmap(lambda p: jax.vmap(lambda x: p(x))(points))(tr["retval"])
+        assert graphs.shape == (10, 6)
 
 
 def test_map():
@@ -539,7 +550,7 @@ def test_bernoulli():
         c = Bernoulli(logits=-1) @ "c"
         return b, c
 
-    tr = p().simulate(jax.random.key(0))
+    tr = p().simulate(key0)
     assert tr["retval"] == [0, 0]
     assert tr["subtraces"]["b"]["score"] == math.log(1 - 0.01)
     assert tr["subtraces"]["c"]["score"] == math.log(

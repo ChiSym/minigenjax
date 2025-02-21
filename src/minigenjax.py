@@ -78,7 +78,7 @@ class GFI[R](GenPrimitive):
 class Distribution(GenPrimitive):
     PHANTOM_KEY = jax.random.key(987654321)
 
-    def __init__(self, name, tfd_ctor, scale: str|None =None):
+    def __init__(self, name, tfd_ctor, scale: str | None = None):
         super().__init__(name)
         self.tfd_ctor = tfd_ctor
         self.scale = scale
@@ -98,9 +98,12 @@ class Distribution(GenPrimitive):
     def simulate_p(self, key: PRNGKeyArray, arg_tuple: tuple):
         keys = {}
         if self.scale:
-            keys['scale'] = self.scale
-        v = self.bind(key, *arg_tuple[1:], **(keys | {'op': "Sample"}))
-        return {"retval": v, "score": self.bind(v, *arg_tuple[1:], **(keys | {'op':"Score"}))}
+            keys["scale"] = self.scale
+        v = self.bind(key, *arg_tuple[1:], **(keys | {"op": "Sample"}))
+        return {
+            "retval": v,
+            "score": self.bind(v, *arg_tuple[1:], **(keys | {"op": "Score"})),
+        }
 
     def __call__(self, *args):
         this = self
@@ -115,26 +118,43 @@ class Distribution(GenPrimitive):
         return Binder()
 
 
-
-BernoulliL = Distribution("Bernoulli", lambda logits: tfp.distributions.Bernoulli(logits=logits), scale="Logit")
-BernoulliP = Distribution("Bernoulli", lambda probs: tfp.distributions.Bernoulli(probs=probs), scale="Prob")
+BernoulliL = Distribution(
+    "Bernoulli",
+    lambda logits: tfp.distributions.Bernoulli(logits=logits),
+    scale="Logit",
+)
+BernoulliP = Distribution(
+    "Bernoulli", lambda probs: tfp.distributions.Bernoulli(probs=probs), scale="Prob"
+)
 Normal = Distribution("Normal", tfp.distributions.Normal)
 MvNormalDiag = Distribution("MvNormalDiag", tfp.distributions.MultivariateNormalDiag)
 Uniform = Distribution("Uniform", tfp.distributions.Uniform)
 Flip = Distribution("Flip", lambda p: tfp.distributions.Bernoulli(probs=p))
-CategoricalL = Distribution("Categorical", lambda logits: tfp.distributions.Categorical(logits=logits), scale="Logit")
-CategoricalP = Distribution("Categorical", lambda probs: tfp.distributions.Categorical(probs=probs), scale="Prob")
+CategoricalL = Distribution(
+    "Categorical",
+    lambda logits: tfp.distributions.Categorical(logits=logits),
+    scale="Logit",
+)
+CategoricalP = Distribution(
+    "Categorical",
+    lambda probs: tfp.distributions.Categorical(probs=probs),
+    scale="Prob",
+)
+
 
 def choose_scale(logits, probs, logit_dist, prob_dist):
     if (logits is None) == (probs is None):
         raise ValueError("Supply exactly one of logits=, probs=")
     return logit_dist(logits) if logits is not None else prob_dist(probs)
 
+
 def Bernoulli(*, logits=None, probs=None):
     return choose_scale(logits, probs, BernoulliL, BernoulliP)
 
+
 def Categorical(*, logits=None, probs=None):
     return choose_scale(logits, probs, CategoricalL, CategoricalP)
+
 
 class KeySplitP(jx.core.Primitive):
     KEY_TYPE = jax.core.get_aval(
@@ -226,6 +246,7 @@ class Transformation[R]:
 
     def run(self, closed_jaxpr: jx.core.ClosedJaxpr, arg_tuple):
         jaxpr = closed_jaxpr.jaxpr
+        flat_args, in_tree = jax.tree.flatten(arg_tuple)
         env: dict[jx.core.Var, Any] = {}
 
         def read(v: jax.core.Atom) -> Any:
@@ -237,7 +258,7 @@ class Transformation[R]:
             env[v] = val
 
         jax.util.safe_map(write, jaxpr.constvars, closed_jaxpr.consts)
-        jax.util.safe_map(write, jaxpr.invars, arg_tuple)
+        jax.util.safe_map(write, jaxpr.invars, flat_args)
 
         for eqn in jaxpr.eqns:
             sub_fns, bind_params = eqn.primitive.get_bind_params(eqn.params)
@@ -317,9 +338,6 @@ class Simulate(Transformation[dict]):
         )(self.S_KEY, in_avals)
 
     def handle_eqn(self, eqn: jx.core.JaxprEqn, params, bind_params):
-        # TODO: This case (repeat) and the following (vmap) are quite similar.
-        # We ought to do something to unify them so they can share code. Note
-        # that the scan combinator doesn't use the primitive technique,
         if isinstance(eqn.primitive, RepeatGF):
             self.key, sub_key = KeySplit.bind(self.key, a="repeat")
             transformed, shape = self.transform_inner(bind_params["inner"], params)
@@ -488,6 +506,8 @@ class VmapGF[R](GFI[R]):
                 "must specify at least one argument/axis for Vmap"
             )
         self.arg_tuple = arg_tuple
+        self.flat_args, self.in_tree = jax.tree.flatten(self.arg_tuple)
+        self.flat_args = tuple(self.flat_args)
         self.in_axes = in_axes
         # find one pair of (parameter number, axis) to use to determine size of vmap
         if isinstance(self.in_axes, tuple):
@@ -498,7 +518,7 @@ class VmapGF[R](GFI[R]):
             self.p_index, self.an_axis = 0, self.in_axes
         # Compute the "scalar" jaxpr by feeding the un-v-mapped arguments to make_jaxpr
         self.jaxpr, self.shape = jax.make_jaxpr(g.f, return_shape=True)(
-            *self.reduced_avals(arg_tuple)
+            *jax.tree.unflatten(self.in_tree, self.reduced_avals(arg_tuple))
         )
 
     def reduced_avals(self, arg_tuple):
@@ -519,7 +539,7 @@ class VmapGF[R](GFI[R]):
             assert isinstance(aval, jax.core.ShapedArray)
             return aval.update(shape=aval.shape[:axis] + aval.shape[axis + 1 :])
 
-        return jax.tree.map(deflate, arg_tuple, ia)
+        return jax.tree.map(deflate, self.flat_args, ia)
 
     def abstract(self, *args, **kwargs):
         return self.shape
@@ -529,7 +549,7 @@ class VmapGF[R](GFI[R]):
 
     def __matmul__(self, address: str) -> R:
         return self.bind(
-            *self.arg_tuple, at=address, in_axes=self.in_axes, inner=self.jaxpr
+            *self.flat_args, at=address, in_axes=self.in_axes, inner=self.jaxpr
         )
 
     def get_args(self) -> tuple:
