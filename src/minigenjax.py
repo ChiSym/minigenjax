@@ -180,11 +180,6 @@ class Gen[R]:
         return lambda *args: VmapGF(self, args, in_axes)
 
 
-# TODO: we need to separate the GFI From GF here.
-# We need a way for combinators to represent the GFI without
-# necessarily holding a bare python function that computes it.
-
-
 class GF[R](GFI[R]):
     def __init__(self, f: Callable[..., R], args: tuple):
         super().__init__(f"GF[{f.__name__}]")

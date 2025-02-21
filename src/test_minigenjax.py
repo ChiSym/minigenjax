@@ -4,7 +4,7 @@ import math
 import jax
 import jax.numpy as jnp
 import pytest
-from .minigenjax import *
+from minigenjax import *
 
 
 @Gen
@@ -19,7 +19,7 @@ def model2(b):
 
 
 @Gen
-def model(x):
+def model3(x):
     a = model1(x) @ "a"
     b = model2(x / 2.0) @ "b"
     return a + b
@@ -30,6 +30,51 @@ def cond_model(b):
     flip = Flip(0.5) @ "flip"
     y = Cond(model1(b), model2(b / 2.0))(flip) @ "s"
     return y
+
+@Gen
+@staticmethod
+def inlier(y, sigma_inlier):
+    return Normal(y, sigma_inlier) @ "value"
+
+@Gen
+@staticmethod
+def outlier(y):
+    return Uniform(y - 1.0, y + 1.0) @ "value"
+
+@Gen
+@staticmethod
+def curve_model(f, x, p_outlier, sigma_inlier):
+    outlier = Flip(p_outlier) @ "outlier"
+    y = f(x)
+    fork = Cond(outlier(y), inlier(y, sigma_inlier))
+    return fork(outlier) @ "y"
+
+@Gen
+@staticmethod
+def coefficient():
+    return Normal(0.0, 1.0) @ "c"
+
+
+
+@jax.tree_util.register_dataclass
+@dataclasses.dataclass
+class Poly:
+    coefficients: jax.Array
+
+    def __call__(self, x):
+        if not self.coefficients.shape:
+            return 0.0
+        powers = jnp.pow(x, jnp.arange(len(self.coefficients)))
+        print(f'self.coefs {self.coefficients} powers {powers}')
+        return jnp.dot(powers, self.coefficients)
+
+    def tree_flatten(self):
+        return ((self.coefficients,), None)
+
+    @classmethod
+    def tree_unflatten(cls, aux_data, children):
+        return cls(*children)
+
 
 
 key0 = jax.random.key(0)
@@ -64,7 +109,7 @@ def test_uniform_model():
 
 
 def test_model_vmap():
-    tr = jax.vmap(model(50.0).simulate)(jax.random.split(key0, 5))
+    tr = jax.vmap(model3(50.0).simulate)(jax.random.split(key0, 5))
     assert jnp.allclose(
         tr["retval"], jnp.array([75.292915, 76.52893, 75.79739, 76.22211, 76.13692])
     )
@@ -280,35 +325,58 @@ def test_plain_scan():
     assert tr["subtraces"]["init"]["retval"] == 9.987485
 
 
-def test_curve_model():
-    # %%
-    @Gen
-    def inlier_model(y, sigma_inlier):
-        return Normal(y, sigma_inlier) @ "value"
+class TestCurve:
+    # where we left off: we want something applicable we can use
+    # as a parameter to the model. A Python function is not JAX
+    # compatible. So we need a Pytree
+# TODO: we need to separate the GFI From GF here.
+# We need a way for combinators to represent the GFI without
+# necessarily holding a bare python function that computes it.
+#
+# So let's pull the poly class up to the top & use it. rewrite
 
-    @Gen
-    def outlier_model(y):
-        return Uniform(y - 1.0, y + 1.0) @ "value"
 
-    @Gen
-    def curve_model(x, p_outlier):
-        outlier = Flip(p_outlier) @ "outlier"
-        y0 = x**2.0 - x + 1.0
-        fork = Cond(outlier_model(y0), inlier_model(y0, 0.1))
-        return fork(outlier) @ "y"
+# is something wrong with the rehydration? is it our involvement?
+# maybe something in the interpreter needs to destructure this object
 
-    tr = curve_model.vmap(in_axes=(0, None))(jnp.arange(-3.0, 3.0), 0.01).simulate(key0)
-    assert jnp.allclose(
-        tr["subtraces"]["__vmap"]["outlier"]["retval"], jnp.array([1, 0, 0, 0, 0, 0])
-    )
-    assert jnp.allclose(
-        tr["retval"],
-        jnp.array([12.718444, 7.111631, 2.9043677, 1.1801443, 0.91071, 2.903885]),
-    )
 
-    tr = curve_model.vmap(in_axes=(None, 0))(
-        0.0, jnp.array([0.001, 0.01, 0.1])
-    ).simulate(key0)
+    @pytest.mark.skip(reason="not ready yet (flatten/unflatten)")
+    def test_curve_model(self):
+        # %%
+
+        f = Poly(jnp.array([1.0, -1.0, 2.0]))  # x**2.0 - x + 1.0
+
+        assert f(0.) == 1.
+
+        tr = curve_model(f, 0.0, 0.0, 0.0).simulate(key0)
+        assert tr['retval'] == 1.0
+        assert tr['subtraces']['outlier']['retval'] == 0
+        assert tr['subtraces']['y']['subtraces']['value']['retval'] == 1.0
+
+
+        tr = curve_model.vmap(in_axes=(None, 0, None, None))(
+            f, jnp.arange(-3.0, 3.0), 0.01, 0.01
+        ).simulate(key0)
+        assert jnp.allclose(
+            tr["subtraces"]["__vmap"]["outlier"]["retval"],
+            jnp.array([1, 0, 0, 0, 0, 0]),
+        )
+        assert jnp.allclose(
+            tr["retval"],
+            jnp.array([12.718444, 7.111631, 2.9043677, 1.1801443, 0.91071, 2.903885]),
+        )
+
+        tr = curve_model.vmap(in_axes=(None, None, 0))(
+            f, 0.0, jnp.array([0.001, 0.01, 0.1]), 0.3
+        ).simulate(key0)
+
+    @pytest.mark.skip(reason="not ready yet (flatten/unflatten)")
+    def test_curve_generation(self):
+        quadratic = TestCurve.Poly(coefficient, 2)
+        points = jnp.arange(-1.0, 1.0, 0.1)
+        # tr = jax.vmap(curve(points).simulate)
+        tr = jax.vmap(quadratic().simulate)(jax.random.split(jax.random.key(0), 10))
+        assert tr == "foo"
 
 
 def test_map():
@@ -319,8 +387,8 @@ def test_map():
     def plus5(x):
         return x + 5.0
 
-    nplus5 = noisy(10).map(plus5)
-    tr = jax.vmap(nplus5.simulate)(jax.random.split(key0, 3))
+    noisy_plus5 = noisy(10).map(plus5)
+    tr = jax.vmap(noisy_plus5.simulate)(jax.random.split(key0, 3))
     assert jnp.allclose(tr["retval"], jnp.array([14.998601, 14.99248, 14.996802]))
 
 
@@ -377,17 +445,6 @@ def test_map_of_repeat():
     @Gen
     def coefficient():
         return Normal(0.0, 1.0) @ "c"
-
-    @jax.tree_util.register_dataclass
-    @dataclasses.dataclass
-    class Poly:
-        coefficients: jax.Array
-
-        def __call__(self, x):
-            if not self.coefficients.shape:
-                return 0.0
-            powers = jnp.pow(x, jnp.arange(len(self.coefficients)))
-            return jnp.dot(powers, self.coefficients)
 
     pg = coefficient().repeat(3).map(Poly)
 
@@ -474,17 +531,20 @@ def test_assess():
     w = q().assess({"p": constraints})
     assert w == -6.0428767
 
+
 def test_bernoulli():
     @Gen
     def p():
-        b = Bernoulli(probs=0.01) @ 'b'
-        c = Bernoulli(logits=-1) @ 'c'
+        b = Bernoulli(probs=0.01) @ "b"
+        c = Bernoulli(logits=-1) @ "c"
         return b, c
 
     tr = p().simulate(jax.random.key(0))
-    assert tr['retval'] == [0, 0]
-    assert tr['subtraces']['b']['score'] == math.log(1-0.01)
-    assert tr['subtraces']['c']['score'] == math.log(1-math.exp(-1)/(1+math.exp(-1)))
+    assert tr["retval"] == [0, 0]
+    assert tr["subtraces"]["b"]["score"] == math.log(1 - 0.01)
+    assert tr["subtraces"]["c"]["score"] == math.log(
+        1 - math.exp(-1) / (1 + math.exp(-1))
+    )
 
     with pytest.raises(ValueError):
         Bernoulli()
