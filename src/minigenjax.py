@@ -114,26 +114,27 @@ class Distribution(GenPrimitive):
 
         return Binder()
 
+
+
 BernoulliL = Distribution("Bernoulli", lambda logits: tfp.distributions.Bernoulli(logits=logits), scale="Logit")
 BernoulliP = Distribution("Bernoulli", lambda probs: tfp.distributions.Bernoulli(probs=probs), scale="Prob")
-
-def Bernoulli(*, logits=None, probs=None):
-    if (logits is None) == (probs is None):
-        raise ValueError("Supply exactly one of logits=, probs=")
-    return BernoulliL(logits) if logits is not None else BernoulliP(probs)
-
-CategoricalL = Distribution("Categorical", lambda logits: tfp.distributions.Categorical(logits=logits), scale="Logit")
-CategoricalP = Distribution("Categorical", lambda probs: tfp.distributions.Categorical(probs=probs), scale="Prob")
-
-def Categorical(*, logits=None, probs=None):
-    if (logits is None) == (probs is None):
-        raise ValueError("Supply exactly one of logits=, probs=")
-    return CategoricalL(logits) if logits is not None else CategoricalP(probs)
-
 Normal = Distribution("Normal", tfp.distributions.Normal)
 MvNormalDiag = Distribution("MvNormalDiag", tfp.distributions.MultivariateNormalDiag)
 Uniform = Distribution("Uniform", tfp.distributions.Uniform)
 Flip = Distribution("Flip", lambda p: tfp.distributions.Bernoulli(probs=p))
+CategoricalL = Distribution("Categorical", lambda logits: tfp.distributions.Categorical(logits=logits), scale="Logit")
+CategoricalP = Distribution("Categorical", lambda probs: tfp.distributions.Categorical(probs=probs), scale="Prob")
+
+def choose_scale(logits, probs, logit_dist, prob_dist):
+    if (logits is None) == (probs is None):
+        raise ValueError("Supply exactly one of logits=, probs=")
+    return logit_dist(logits) if logits is not None else prob_dist(probs)
+
+def Bernoulli(*, logits=None, probs=None):
+    return choose_scale(logits, probs, BernoulliL, BernoulliP)
+
+def Categorical(*, logits=None, probs=None):
+    return choose_scale(logits, probs, CategoricalL, CategoricalP)
 
 class KeySplitP(jx.core.Primitive):
     KEY_TYPE = jax.core.get_aval(
