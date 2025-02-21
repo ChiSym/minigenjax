@@ -1,7 +1,9 @@
 # %%
 import dataclasses
+import math
 import jax
 import jax.numpy as jnp
+import pytest
 from .minigenjax import *
 
 
@@ -127,7 +129,7 @@ def test_distribution_as_sampler():
         jnp.array([1, 1, 1, 0, 1, 1, 0, 1, 1, 0]),
     )
     assert jnp.allclose(
-        vmap(10)(Categorical(jnp.array([1.1, -1.0, 0.9]))),
+        vmap(10)(Categorical(logits=jnp.array([1.1, -1.0, 0.9]))),
         jnp.array([0, 0, 2, 2, 0, 1, 0, 0, 0, 0]),
     )
     assert jnp.allclose(
@@ -471,6 +473,24 @@ def test_assess():
     assert w == -6.0428767
     w = q().assess({"p": constraints})
     assert w == -6.0428767
+
+def test_bernoulli():
+    @Gen
+    def p():
+        b = Bernoulli(probs=0.01) @ 'b'
+        c = Bernoulli(logits=-1) @ 'c'
+        return b, c
+
+    tr = p().simulate(jax.random.key(0))
+    assert tr['retval'] == [0, 0]
+    assert tr['subtraces']['b']['score'] == math.log(1-0.01)
+    assert tr['subtraces']['c']['score'] == math.log(1-math.exp(-1)/(1+math.exp(-1)))
+
+    with pytest.raises(ValueError):
+        Bernoulli()
+
+    with pytest.raises(ValueError):
+        Bernoulli(logits=-1, probs=0.5)
 
 
 # %%

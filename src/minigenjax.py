@@ -78,9 +78,10 @@ class GFI[R](GenPrimitive):
 class Distribution(GenPrimitive):
     PHANTOM_KEY = jax.random.key(987654321)
 
-    def __init__(self, name, tfd_ctor):
+    def __init__(self, name, tfd_ctor, scale: str|None =None):
         super().__init__(name)
         self.tfd_ctor = tfd_ctor
+        self.scale = scale
 
     def abstract(self, *args, **kwargs):
         return args[1]
@@ -95,8 +96,11 @@ class Distribution(GenPrimitive):
                 raise NotImplementedError(f'{self.name}.{kwargs["op"]}')
 
     def simulate_p(self, key: PRNGKeyArray, arg_tuple: tuple):
-        v = self.bind(key, *arg_tuple[1:], op="Sample")
-        return {"retval": v, "score": self.bind(v, *arg_tuple[1:], op="Score")}
+        keys = {}
+        if self.scale:
+            keys['scale'] = self.scale
+        v = self.bind(key, *arg_tuple[1:], **(keys | {'op': "Sample"}))
+        return {"retval": v, "score": self.bind(v, *arg_tuple[1:], **(keys | {'op':"Score"}))}
 
     def __call__(self, *args):
         this = self
@@ -110,15 +114,26 @@ class Distribution(GenPrimitive):
 
         return Binder()
 
+BernoulliL = Distribution("Bernoulli", lambda logits: tfp.distributions.Bernoulli(logits=logits), scale="Logit")
+BernoulliP = Distribution("Bernoulli", lambda probs: tfp.distributions.Bernoulli(probs=probs), scale="Prob")
+
+def Bernoulli(*, logits=None, probs=None):
+    if (logits is None) == (probs is None):
+        raise ValueError("Supply exactly one of logits=, probs=")
+    return BernoulliL(logits) if logits is not None else BernoulliP(probs)
+
+CategoricalL = Distribution("Categorical", lambda logits: tfp.distributions.Categorical(logits=logits), scale="Logit")
+CategoricalP = Distribution("Categorical", lambda probs: tfp.distributions.Categorical(probs=probs), scale="Prob")
+
+def Categorical(*, logits=None, probs=None):
+    if (logits is None) == (probs is None):
+        raise ValueError("Supply exactly one of logits=, probs=")
+    return CategoricalL(logits) if logits is not None else CategoricalP(probs)
 
 Normal = Distribution("Normal", tfp.distributions.Normal)
 MvNormalDiag = Distribution("MvNormalDiag", tfp.distributions.MultivariateNormalDiag)
 Uniform = Distribution("Uniform", tfp.distributions.Uniform)
-Flip = Distribution("Bernoulli", lambda p: tfp.distributions.Bernoulli(probs=p))
-Categorical = Distribution(
-    "Categorical", lambda ls: tfp.distributions.Categorical(logits=ls)
-)
-
+Flip = Distribution("Flip", lambda p: tfp.distributions.Bernoulli(probs=p))
 
 class KeySplitP(jx.core.Primitive):
     KEY_TYPE = jax.core.get_aval(
