@@ -12,6 +12,9 @@ from jaxtyping import Array, PRNGKeyArray
 
 
 # %%
+Address = tuple[str, ...]
+Constraint = dict[Address, Array] | Callable[[Address], Array | None]
+
 class GenPrimitive(jx.core.Primitive):
     def __init__(self, name):
         super().__init__(name)
@@ -36,12 +39,11 @@ class GenPrimitive(jx.core.Primitive):
         )
         return result, batched_axes
 
-    def simulate_p(self, key: PRNGKeyArray, arg_tuple: tuple) -> dict:
+    def simulate_p(self, key: PRNGKeyArray, arg_tuple: tuple, address: Address) -> dict:
         raise NotImplementedError(f"simulate_p: {self}")
 
-    # TODO: type of constraint?
     def assess_p(
-        self, arg_tuple: tuple, constraint, base_address: tuple[str, ...]
+        self, arg_tuple: tuple, constraint: Constraint, address: tuple[str, ...]
     ) -> tuple[Array, Array]:
         raise NotImplementedError(f"assess_p: {self}")
 
@@ -54,7 +56,7 @@ class GFI[R](GenPrimitive):
         super().__init__(name)
 
     def simulate(self, key: PRNGKeyArray) -> dict:
-        return self.simulate_p(key, self.get_args())
+        return self.simulate_p(key, self.get_args(), ())
 
     def assess(self, constraint) -> Array:
         return self.assess_p(self.get_args(), constraint, ())[1]
@@ -95,7 +97,9 @@ class Distribution(GenPrimitive):
             case _:
                 raise NotImplementedError(f'{self.name}.{kwargs["op"]}')
 
-    def simulate_p(self, key: PRNGKeyArray, arg_tuple: tuple):
+    def simulate_p(self, key: PRNGKeyArray, arg_tuple: tuple, address: Address):
+        # TODO: should we delegate the constraint lookup here, or have an assess_p method?
+        # TODO: are we sure we are propagating `scale` through the transformations?
         keys = {}
         if self.scale:
             keys["scale"] = self.scale
@@ -217,13 +221,13 @@ class GF[R](GFI[R]):
         v = jax.core.eval_jaxpr(self.jaxpr.jaxpr, self.jaxpr.consts, *args)
         return v if self.multiple_results else v[0]
 
-    def simulate_p(self, key: PRNGKeyArray, arg_tuple: tuple) -> dict:
-        return Simulate(key).run(self.jaxpr, arg_tuple)
+    def simulate_p(self, key: PRNGKeyArray, arg_tuple: tuple, address) -> dict:
+        return Simulate(key, address).run(self.jaxpr, arg_tuple)
 
     def assess_p(
-        self, arg_tuple: tuple, constraint, base_address
+        self, arg_tuple: tuple, constraint: Constraint, address
     ) -> tuple[Array, Array]:
-        a = Assess(constraint, base_address)
+        a = Assess(constraint, address)
         value = a.run(self.jaxpr, arg_tuple)
         return value, a.score
 
@@ -285,7 +289,7 @@ class Transformation[R]:
 
 class Assess(Transformation[Array]):
     def __init__(
-        self, constraint: dict[tuple[str, ...], Array], address: tuple[str, ...]
+        self, constraint: Constraint, address: tuple[str, ...]
     ):
         self.constraint = constraint
         self.address = address
@@ -298,13 +302,14 @@ class Assess(Transformation[Array]):
             return self.constraint(addr)
 
     def handle_eqn(self, eqn: jx.core.JaxprEqn, params, bind_params):
-        addr = self.address + (bind_params["at"],)
         if isinstance(eqn.primitive, Distribution):
+            addr = self.address + (bind_params["at"],)
             v = self.apply_constraint(addr)
             self.score += eqn.primitive.bind(v, *params[1:], op="Score")
             return v
 
         if isinstance(eqn.primitive, GenPrimitive):
+            addr = self.address + (bind_params["at"],)
             ans, score = eqn.primitive.assess_p(params, self.constraint, addr)
             self.score += score
             return ans
@@ -315,9 +320,11 @@ class Assess(Transformation[Array]):
 class Simulate(Transformation[dict]):
     S_KEY = jax.random.key(99999)
 
-    def __init__(self, key: PRNGKeyArray):
+    def __init__(self, key: PRNGKeyArray, address: tuple[str, ...], constraint: dict[tuple[str, ...], Array] = {}):
         self.key = key
         self.trace = {}
+        self.address = address
+        self.score = jnp.array(0.0)
 
     def address_from_branch(self, b: jx.core.ClosedJaxpr):
         """Look at the given JAXPR and find out if it is a single-instruction
@@ -328,21 +335,22 @@ class Simulate(Transformation[dict]):
         if len(b.jaxpr.eqns) == 1 and isinstance(b.jaxpr.eqns[0].primitive, GF):
             return b.jaxpr.eqns[0].params.get("at")
 
-    def transform_inner(self, jaxpr, in_avals):
+    def transform_inner(self, jaxpr, in_avals, address):
         """Apply simulate to jaxpr and return the transformed jaxpr together
         with its return shape."""
 
         return jax.make_jaxpr(
-            lambda key, in_avals: Simulate(key).run(jaxpr, in_avals),
+            lambda key, in_avals: Simulate(key, address).run(jaxpr, in_avals),
             return_shape=True,
         )(self.S_KEY, in_avals)
 
     def handle_eqn(self, eqn: jx.core.JaxprEqn, params, bind_params):
         if isinstance(eqn.primitive, RepeatGF):
             self.key, sub_key = KeySplit.bind(self.key, a="repeat")
-            transformed, shape = self.transform_inner(bind_params["inner"], params)
+            addr = self.address + (bind_params['at'],)
+            transformed, shape = self.transform_inner(bind_params["inner"], params, addr)
             new_params = bind_params | {"inner": transformed}
-            ans = eqn.primitive.Simulate(eqn.primitive, shape).bind(
+            ans = RepeatGF.Simulate(eqn.primitive, shape).bind(
                 sub_key, *params, **new_params
             )
             u = jax.tree.unflatten(jax.tree.structure(shape), ans)
@@ -351,8 +359,9 @@ class Simulate(Transformation[dict]):
 
         if isinstance(eqn.primitive, VmapGF):
             self.key, sub_key = KeySplit.bind(self.key, a="vmap")
+            addr = self.address + (bind_params['at'],)
             transformed, shape = self.transform_inner(
-                bind_params["inner"], eqn.primitive.reduced_avals(params)
+                bind_params["inner"], eqn.primitive.reduced_avals(params), addr
             )
             new_params = bind_params | {"inner": transformed}
             ans = eqn.primitive.Simulate(eqn.primitive, shape).bind(
@@ -364,7 +373,8 @@ class Simulate(Transformation[dict]):
 
         if isinstance(eqn.primitive, GenPrimitive):
             self.key, sub_key = KeySplit.bind(self.key, a="gen_p")
-            ans = eqn.primitive.simulate_p(sub_key, params)
+            addr = self.address + (bind_params['at'],)
+            ans = eqn.primitive.simulate_p(sub_key, params, addr)
             self.trace[bind_params["at"]] = ans
             return ans["retval"]
 
@@ -372,35 +382,48 @@ class Simulate(Transformation[dict]):
             self.key, sub_key = KeySplit.bind(self.key, a="cond_p")
             branches = bind_params["branches"]
 
-            # TODO: is it OK to pass the same sub_key to both sides?
-            # NB! branches[0] is the false branch, [1] is the true branch,
-            ans = jax.lax.cond(
-                params[0],
-                lambda: Simulate(sub_key).run(branches[1], params[1:]),
-                lambda: Simulate(sub_key).run(branches[0], params[1:]),
-            )
-
             branch_addresses = tuple(map(self.address_from_branch, branches))
             if branch_addresses[0] and all(
                 b == branch_addresses[0] for b in branch_addresses[1:]
             ):
-                address = branch_addresses[0]
-                self.trace[address] = ans["subtraces"][address]
+                address = self.address + (branch_addresses[0],)
+                sub_address = branch_addresses[0]
+            else:
+                address = self.address
+                sub_address = None
+
+            # TODO: is it OK to pass the same sub_key to both sides?
+            # NB! branches[0] is the false branch, [1] is the true branch,
+            ans = jax.lax.cond(
+                params[0],
+                lambda: Simulate(sub_key, address).run(branches[1], params[1:]),
+                lambda: Simulate(sub_key, address).run(branches[0], params[1:]),
+            )
+
+            if sub_address:
+                self.trace[sub_address] = ans["subtraces"][sub_address]
             return [ans["retval"]]
 
         if eqn.primitive is jax.lax.scan_p:
             self.key, sub_key = KeySplit.bind(self.key, a="scan_p")
             inner = bind_params["jaxpr"]
 
+            if a := self.address_from_branch(inner):
+                address = self.address + (a,)
+                sub_address = a
+            else:
+                address = self.address
+                sub_address = None
+
             def step(carry_key, s):
                 carry, key = carry_key
                 key, k1 = KeySplit.bind(key, a="scan_step")
-                v = Simulate(k1).run(inner, (carry, s))
+                v = Simulate(k1, address).run(inner, (carry, s))
                 return ((v["retval"][0], key), v)
 
             ans = jax.lax.scan(step, (params[0], sub_key), params[1])
-            if address := self.address_from_branch(inner):
-                self.trace[address] = ans[1]["subtraces"][address]
+            if sub_address:
+                self.trace[sub_address] = ans[1]["subtraces"][sub_address]
 
             # we extended the carry with the key; now drop it
             return (ans[0][0], ans[1]["retval"][1])
@@ -468,8 +491,12 @@ class RepeatGF[R](GFI[R]):
         assert isinstance(a, jax.core.ShapedArray)
         return jax.core.ShapedArray((self.n,) + a.shape, a.dtype)
 
-    def simulate_p(self, key: PRNGKeyArray, arg_tuple: tuple) -> dict:
+    def simulate_p(self, key: PRNGKeyArray, arg_tuple: tuple, address: Address) -> dict:
+        # TODO: change this to simulate_p?
+        # something has to give, since we need to propagate address segments, at the very leaset
+        #return GF(lambda: self @ "__repeat", ()).simulate(key)
         return GF(lambda: self @ "__repeat", ()).simulate(key)
+
 
     def __matmul__(self, address: str) -> R:
         return self.bind(
@@ -544,7 +571,8 @@ class VmapGF[R](GFI[R]):
     def abstract(self, *args, **kwargs):
         return self.shape
 
-    def simulate_p(self, key: PRNGKeyArray, arg_tuple: tuple) -> dict:
+    def simulate_p(self, key: PRNGKeyArray, arg_tuple: tuple, address: Address) -> dict:
+        # TOOD: make this simulate_p?
         return GF(lambda: self @ "__vmap", ()).simulate(key)
 
     def __matmul__(self, address: str) -> R:
@@ -588,8 +616,8 @@ class MapGF[R, S](GFI[S]):
         # sufficient to apply f to a tracer to compose the abstraction?
         return self.gfi.abstract(*args, **kwargs)
 
-    def simulate_p(self, key: PRNGKeyArray, arg_tuple: tuple) -> dict:
-        v = self.gfi.simulate_p(key, arg_tuple)
+    def simulate_p(self, key: PRNGKeyArray, arg_tuple: tuple, address: Address) -> dict:
+        v = self.gfi.simulate_p(key, arg_tuple, address)
         v["retval"] = self.f(v["retval"])
         return v
 
