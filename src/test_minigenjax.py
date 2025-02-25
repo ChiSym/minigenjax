@@ -437,6 +437,24 @@ def test_repeat_in_model():
     )
 
 
+def test_repeat_of_repeat():
+    @Gen
+    def y(x):
+        return Normal(2.0 * x + 1, 0.1) @ "y"
+
+    tr = y(5.0).repeat(4).repeat(3).simulate(key0)
+    assert jnp.allclose(
+        tr["retval"],
+        jnp.array(
+            [
+                [11.073222, 11.058437, 11.046644, 11.167152],
+                [11.141579, 11.238223, 10.894876, 11.089534],
+                [10.886496, 10.8805065, 11.09115, 10.909199],
+            ]
+        ),
+    )
+
+
 def test_map_in_model():
     @Gen
     def x(y):
@@ -523,6 +541,32 @@ def test_vmap():
     # try the above without enumerating axis/arguments in in_axes
     tr3 = model.vmap()(jnp.arange(5.0), 0.1 * (1.0 + jnp.arange(5.0))).simulate(key0)
     assert jnp.allclose(tr3["retval"], tr2["retval"])
+
+
+@pytest.mark.skip(reason="nested vmap not working yet")
+def test_vmap_of_vmap():
+    @Gen
+    def model(x, y):
+        return Normal(x, y) @ "n"
+
+    tr = (
+        model.vmap(in_axes=(0, None))
+        .vmap(in_axes=(None, 0))(jnp.arange(10.0, 15.0), jnp.arange(0.0, 1.6, 0.2))
+        .simulate(key0)
+    )
+    assert jnp.allclose(
+        tr["retval"],
+        jnp.array(
+            # this looked promising but it was cheating by using broadcast semantics on the inner loop
+            [
+                [10.0, 11.0, 12.0, 13.0, 14.0],
+                [9.807053, 11.150885, 11.985554, 12.91451, 13.865575],
+                [9.949703, 11.00537, 12.350649, 13.016957, 14.176276],
+                [9.51422, 10.44197, 10.95027, 12.562811, 14.896659],
+                [9.411664, 11.082625, 11.907326, 14.153446, 13.8836355],
+            ]
+        ),
+    )
 
 
 def test_assess():

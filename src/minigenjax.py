@@ -15,6 +15,7 @@ from jaxtyping import Array, PRNGKeyArray
 Address = tuple[str, ...]
 Constraint = dict[Address, Array] | Callable[[Address], Array | None]
 
+
 class GenPrimitive(jx.core.Primitive):
     def __init__(self, name):
         super().__init__(name)
@@ -288,9 +289,7 @@ class Transformation[R]:
 
 
 class Assess(Transformation[Array]):
-    def __init__(
-        self, constraint: Constraint, address: tuple[str, ...]
-    ):
+    def __init__(self, constraint: Constraint, address: tuple[str, ...]):
         self.constraint = constraint
         self.address = address
         self.score = jnp.array(0.0)
@@ -320,7 +319,12 @@ class Assess(Transformation[Array]):
 class Simulate(Transformation[dict]):
     S_KEY = jax.random.key(99999)
 
-    def __init__(self, key: PRNGKeyArray, address: tuple[str, ...], constraint: dict[tuple[str, ...], Array] = {}):
+    def __init__(
+        self,
+        key: PRNGKeyArray,
+        address: tuple[str, ...],
+        constraint: dict[tuple[str, ...], Array] = {},
+    ):
         self.key = key
         self.trace = {}
         self.address = address
@@ -347,8 +351,10 @@ class Simulate(Transformation[dict]):
     def handle_eqn(self, eqn: jx.core.JaxprEqn, params, bind_params):
         if isinstance(eqn.primitive, RepeatGF):
             self.key, sub_key = KeySplit.bind(self.key, a="repeat")
-            addr = self.address + (bind_params['at'],)
-            transformed, shape = self.transform_inner(bind_params["inner"], params, addr)
+            addr = self.address + (bind_params["at"],)
+            transformed, shape = self.transform_inner(
+                bind_params["inner"], params, addr
+            )
             new_params = bind_params | {"inner": transformed}
             ans = RepeatGF.Simulate(eqn.primitive, shape).bind(
                 sub_key, *params, **new_params
@@ -359,7 +365,7 @@ class Simulate(Transformation[dict]):
 
         if isinstance(eqn.primitive, VmapGF):
             self.key, sub_key = KeySplit.bind(self.key, a="vmap")
-            addr = self.address + (bind_params['at'],)
+            addr = self.address + (bind_params["at"],)
             transformed, shape = self.transform_inner(
                 bind_params["inner"], eqn.primitive.reduced_avals(params), addr
             )
@@ -373,7 +379,7 @@ class Simulate(Transformation[dict]):
 
         if isinstance(eqn.primitive, GenPrimitive):
             self.key, sub_key = KeySplit.bind(self.key, a="gen_p")
-            addr = self.address + (bind_params['at'],)
+            addr = self.address + (bind_params["at"],)
             ans = eqn.primitive.simulate_p(sub_key, params, addr)
             self.trace[bind_params["at"]] = ans
             return ans["retval"]
@@ -484,6 +490,13 @@ class RepeatGF[R](GFI[R]):
         self.gfi = gfi
         self.n = n
         self.multiple_results = self.gfi.multiple_results
+        # TODO: try to reuse self.__matmul__ here, if possible
+        self.jaxpr, self.shape = jax.make_jaxpr(
+            lambda *args: self.bind(
+                *args, n=self.n, at="__r_gf", inner=self.gfi.get_jaxpr()
+            ),
+            return_shape=True,
+        )(*self.get_args())
 
     def abstract(self, *args, **kwargs):
         a = self.gfi.abstract(*args, **kwargs)
@@ -492,16 +505,15 @@ class RepeatGF[R](GFI[R]):
         return jax.core.ShapedArray((self.n,) + a.shape, a.dtype)
 
     def simulate_p(self, key: PRNGKeyArray, arg_tuple: tuple, address: Address) -> dict:
-        # TODO: change this to simulate_p?
-        # something has to give, since we need to propagate address segments, at the very leaset
-        #return GF(lambda: self @ "__repeat", ()).simulate(key)
-        return GF(lambda: self @ "__repeat", ()).simulate(key)
-
+        return Simulate(key, address).run(self.get_jaxpr(), arg_tuple)
 
     def __matmul__(self, address: str) -> R:
         return self.bind(
             *self.gfi.get_args(), at=address, n=self.n, inner=self.gfi.get_jaxpr()
         )
+
+    def get_jaxpr(self) -> jx.core.ClosedJaxpr:
+        return self.jaxpr
 
     def get_args(self) -> tuple:
         return self.gfi.get_args()
@@ -532,6 +544,7 @@ class VmapGF[R](GFI[R]):
             raise NotImplementedError(
                 "must specify at least one argument/axis for Vmap"
             )
+        # TODO: consider if we want to make this
         self.arg_tuple = arg_tuple
         self.flat_args, self.in_tree = jax.tree.flatten(self.arg_tuple)
         self.flat_args = tuple(self.flat_args)
@@ -544,9 +557,21 @@ class VmapGF[R](GFI[R]):
         else:
             self.p_index, self.an_axis = 0, self.in_axes
         # Compute the "scalar" jaxpr by feeding the un-v-mapped arguments to make_jaxpr
-        self.jaxpr, self.shape = jax.make_jaxpr(g.f, return_shape=True)(
-            *jax.tree.unflatten(self.in_tree, self.reduced_avals(arg_tuple))
+        # TODO: does `self` need to remember these?
+        self.inner_jaxpr, self.inner_shape = jax.make_jaxpr(g.f, return_shape=True)(
+            *jax.tree.unflatten(self.in_tree, self.reduced_avals(self.arg_tuple))
         )
+        n = self.arg_tuple[self.p_index].shape[self.an_axis]
+        # the shape of the vmapped function will increase every axis of the result
+        self.shape = jax.ShapeDtypeStruct(
+            (n,) + self.inner_shape.shape, self.inner_shape.dtype
+        )
+        self.jaxpr, self.shape = jax.make_jaxpr(
+            lambda *args: self.bind(
+                *args, in_axes=self.in_axes, at="__vmap_gf", inner=self.inner_jaxpr
+            ),
+            return_shape=True,
+        )(*self.flat_args)
 
     def reduced_avals(self, arg_tuple):
         # if in_axes is not an tuple, lift it to the same shape as arg tuple
@@ -577,11 +602,14 @@ class VmapGF[R](GFI[R]):
 
     def __matmul__(self, address: str) -> R:
         return self.bind(
-            *self.flat_args, at=address, in_axes=self.in_axes, inner=self.jaxpr
+            *self.flat_args, at=address, in_axes=self.in_axes, inner=self.inner_jaxpr
         )
 
     def get_args(self) -> tuple:
         return self.arg_tuple
+
+    def get_jaxpr(self) -> jx.core.ClosedJaxpr:
+        return self.jaxpr
 
     class Simulate[S](GFI[S]):
         def __init__(self, r: "VmapGF[S]", shape: Any):  # TODO: PyTreeDef?
@@ -632,6 +660,3 @@ class MapGF[R, S](GFI[S]):
         return jax.make_jaxpr(
             lambda args: self.f(*jax.core.eval_jaxpr(ij.jaxpr, ij.consts, *args))
         )(self.gfi.get_args())
-
-
-# %%
