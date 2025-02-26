@@ -33,19 +33,16 @@ def cond_model(b):
 
 
 @Gen
-@staticmethod
 def inlier_model(y, sigma_inlier):
     return Normal(y, sigma_inlier) @ "value"
 
 
 @Gen
-@staticmethod
 def outlier_model(y):
     return Uniform(y - 1.0, y + 1.0) @ "value"
 
 
 @Gen
-@staticmethod
 def curve_model(f, x, p_outlier, sigma_inlier):
     outlier = Flip(p_outlier) @ "outlier"
     y = f(x)
@@ -54,7 +51,6 @@ def curve_model(f, x, p_outlier, sigma_inlier):
 
 
 @Gen
-@staticmethod
 def coefficient():
     return Normal(0.0, 1.0) @ "c"
 
@@ -71,13 +67,6 @@ class Poly:
             jnp.array(x)[jnp.newaxis], jnp.arange(self.coefficients.shape[0])
         )
         return self.coefficients.T @ powers
-
-    def tree_flatten(self):
-        return ((self.coefficients,), None)
-
-    @classmethod
-    def tree_unflatten(cls, aux_data, children):
-        return cls(*children)
 
 
 key0 = jax.random.key(0)
@@ -399,6 +388,7 @@ class TestCurve:
                 @ "y"
             )
 
+        print(jax.make_jaxpr(model(points).simulate)(key0))
         jit_model = jax.jit(model(points).simulate)
 
         tr = jit_model(key0)
