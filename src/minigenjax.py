@@ -21,7 +21,6 @@ class GenPrimitive(jx.core.Primitive):
         super().__init__(name)
         self.def_abstract_eval(self.abstract)
         self.def_impl(self.concrete)
-        mlir.register_lowering(self, mlir.lower_fun(self.impl, self.multiple_results))
         batching.primitive_batchers[self] = self.batch
 
     def abstract(self, *args, **kwargs):
@@ -85,6 +84,7 @@ class Distribution(GenPrimitive):
         super().__init__(name)
         self.tfd_ctor = tfd_ctor
         self.scale = scale
+        mlir.register_lowering(self, mlir.lower_fun(self.impl, False))
 
     def abstract(self, *args, **kwargs):
         return args[1]
@@ -92,7 +92,15 @@ class Distribution(GenPrimitive):
     def concrete(self, *args, **kwargs):
         match kwargs.get("op", "Sample"):
             case "Sample":
-                return self.tfd_ctor(*args[1:]).sample(seed=args[0])
+                # we convert to float here because Bernoulli/Flip will
+                # normally return an int, and that confuses XLA, since
+                # our abstract implementation says the return types are
+                # floats. TODO: consider allowing the marking of integer-
+                # returning distributions as ints are sometimes nice to
+                # work with.
+                return jnp.asarray(
+                    self.tfd_ctor(*args[1:]).sample(seed=args[0]), dtype=float
+                )
             case "Score":
                 return self.tfd_ctor(*args[1:]).log_prob(args[0])
             case _:
@@ -210,6 +218,7 @@ class GF[R](GFI[R]):
         super().__init__(f"GF[{f.__name__}]")
         self.f = f
         self.args = args
+        self.flat_args, self.in_tree = jax.tree.flatten(self.args)
         self.jaxpr, self.shape = jax.make_jaxpr(f, return_shape=True)(*args)
         self.multiple_results = isinstance(self.shape, tuple)
         a_vals = [ov.aval for ov in self.jaxpr.jaxpr.outvars]
@@ -233,7 +242,7 @@ class GF[R](GFI[R]):
         return value, a.score
 
     def __matmul__(self, address: str):
-        return self.bind(*self.args, at=address)
+        return self.bind(*self.flat_args, at=address)
 
     def get_args(self) -> tuple:
         return self.args
@@ -408,7 +417,9 @@ class Simulate(Transformation[dict]):
 
             if sub_address:
                 self.trace[sub_address] = ans["subtraces"][sub_address]
-            return [ans["retval"]]
+            # The reasons why this result has to be a seqeuence is obscure to me,
+            # but cond_p as a primitive requires "multiple results."
+            return (ans["retval"],)
 
         if eqn.primitive is jax.lax.scan_p:
             self.key, sub_key = KeySplit.bind(self.key, a="scan_p")
@@ -524,9 +535,17 @@ class RepeatGF[R](GFI[R]):
             self.r = r
             self.shape = shape
             self.multiple_results = True
+            mlir.register_lowering(
+                self, mlir.lower_fun(self.impl, self.multiple_results)
+            )
 
         def abstract(self, *args, **kwargs):
-            return [jax.core.get_aval(s) for s in jax.tree.flatten(self.shape)[0]]
+            def inflate(aval):
+                return aval.update(shape=(self.r.n,) + aval.shape)
+
+            return [
+                inflate(jax.core.get_aval(s)) for s in jax.tree.flatten(self.shape)[0]
+            ]
 
         def concrete(self, *args, **kwargs):
             # this is called after the simulate transformation so the key is the first argument
@@ -615,22 +634,33 @@ class VmapGF[R](GFI[R]):
         def __init__(self, r: "VmapGF[S]", shape: Any):  # TODO: PyTreeDef?
             super().__init__("Vmap.Simulate")
             self.r = r
+            self.n = self.r.arg_tuple[self.r.p_index].shape[self.r.an_axis]
             self.shape = shape
             self.multiple_results = True
+            mlir.register_lowering(
+                self, mlir.lower_fun(self.impl, self.multiple_results)
+            )
 
         def abstract(self, *args, **kwargs):
-            return [jax.core.get_aval(s) for s in jax.tree.flatten(self.shape)[0]]
+            def inflate(aval: jax.core.AbstractValue):
+                assert isinstance(aval, jax.core.ShapedArray)
+                s = aval.shape
+                return aval.update(shape=(self.n,) + s)
+                return aval
+
+            return [
+                inflate(jax.core.get_aval(s)) for s in jax.tree.flatten(self.shape)[0]
+            ]
 
         def concrete(self, *args, **kwargs):
             # this is called after the simulate transformation so the key is the first argument
-            n = self.r.arg_tuple[self.r.p_index].shape[self.r.an_axis]
             j: jx.core.ClosedJaxpr = kwargs["inner"]
             return jax.vmap(
                 lambda k, arg_tuple: jax.core.eval_jaxpr(
                     j.jaxpr, j.consts, k, *arg_tuple
                 ),
                 in_axes=(0, self.r.in_axes),
-            )(jax.random.split(args[0], n), args[1:])
+            )(jax.random.split(args[0], self.n), args[1:])
 
 
 class MapGF[R, S](GFI[S]):

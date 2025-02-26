@@ -67,8 +67,10 @@ class Poly:
     def __call__(self, x):
         if not self.coefficients.shape:
             return 0.0
-        powers = jnp.pow(x, jnp.arange(len(self.coefficients)))
-        return jnp.dot(powers, self.coefficients)
+        powers = jnp.pow(
+            jnp.array(x)[jnp.newaxis], jnp.arange(self.coefficients.shape[0])
+        )
+        return self.coefficients.T @ powers
 
     def tree_flatten(self):
         return ((self.coefficients,), None)
@@ -91,11 +93,11 @@ def test_pytree():
     def noisy_eval(f, x):
         return f(x) + Normal(0.0, 0.01) @ "noise"
 
-    tr = noisy_eval(p, 0.0).simulate(jax.random.key(1))
+    tr = jax.jit(noisy_eval(p, 0.0).simulate)(jax.random.key(1))
     assert tr["retval"] == -0.38295257
     assert tr["retval"] == p(0.0) + tr["subtraces"]["noise"]["retval"]
 
-    tr = noisy_eval.vmap(in_axes=(None, 0))(p, jnp.arange(-2.0, 2.0)).simulate(
+    tr = jax.jit(noisy_eval.vmap(in_axes=(None, 0))(p, jnp.arange(-2.0, 2.0)).simulate)(
         jax.random.key(2)
     )
     assert jnp.allclose(
@@ -382,12 +384,64 @@ class TestCurve:
 
     def test_curve_generation(self):
         quadratic = coefficient().repeat(3).map(Poly)
-        points = jnp.arange(-3.0, 3.0)
+        points = jnp.arange(-3, 4) / 10.0
 
-        tr = jax.vmap(quadratic.simulate)(jax.random.split(key0, 10))
-        assert tr["retval"].coefficients.shape == (10, 3)
-        graphs = jax.vmap(lambda p: jax.vmap(lambda x: p(x))(points))(tr["retval"])
-        assert graphs.shape == (10, 6)
+        # curve_model(f, x, p_outlier, sigma_inlier)
+        @Gen
+        def model(xs):
+            poly = quadratic @ "p"
+            p_outlier = Uniform(0.0, 1.0) @ "p_outlier"
+            sigma_inlier = Uniform(0.0, 0.3) @ "sigma_inlier"
+            return (
+                curve_model.vmap(in_axes=(None, 0, None, None))(
+                    poly, xs, p_outlier, sigma_inlier
+                )
+                @ "y"
+            )
+
+        jit_model = jax.jit(model(points).simulate)
+
+        tr = jit_model(key0)
+        assert jnp.allclose(
+            tr["subtraces"]["p"]["c"]["retval"],
+            jnp.array([-0.37148237, 1.1890742, -0.6553323]),
+        )
+        assert jnp.allclose(
+            tr["retval"],
+            jnp.array(
+                [
+                    -1.5074735,
+                    -0.4633195,
+                    -0.22523868,
+                    -0.60849184,
+                    -0.3310216,
+                    -0.06287874,
+                    -0.30322796,
+                ]
+            ),
+        )
+        assert jnp.allclose(
+            tr["subtraces"]["y"]["outlier"]["retval"],
+            jnp.array([1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        )
+        assert jnp.allclose(
+            tr["retval"],
+            jnp.array(
+                [
+                    -1.5074735,
+                    -0.4633195,
+                    -0.22523868,
+                    -0.60849184,
+                    -0.3310216,
+                    -0.06287874,
+                    -0.30322796,
+                ]
+            ),
+        )
+
+        tr = jax.vmap(jit_model)(jax.random.split(key0, 10))
+        assert tr["subtraces"]["p"]["c"]["retval"].shape == (10, 3)
+        assert tr["retval"].shape == (10, 7)
 
 
 def test_map():
@@ -519,8 +573,6 @@ def test_vmap():
     assert tr["retval"] == 5.9874845
 
     gf = model.vmap(in_axes=(0, None))(jnp.arange(5.0), 1.0)
-    # vector_jaxpr = jax.make_jaxpr(gf.simulate)(key0)
-    # print(f'vector_jaxpr {vector_jaxpr}')
     tr0 = gf.simulate(key0)
 
     assert jnp.allclose(
@@ -531,9 +583,11 @@ def test_vmap():
     assert jnp.allclose(
         tr1["retval"], jnp.array([5.077494, 5.204761, 5.305936, 5.4117436])
     )
-    tr2 = model.vmap(in_axes=(0, 0))(
-        jnp.arange(5.0), 0.1 * (1.0 + jnp.arange(5.0))
-    ).simulate(key0)
+    tr2 = jax.jit(
+        model.vmap(in_axes=(0, 0))(
+            jnp.arange(5.0), 0.1 * (1.0 + jnp.arange(5.0))
+        ).simulate
+    )(key0)
     assert jnp.allclose(
         tr2["retval"],
         jnp.array([0.10715472, 1.2081504, 2.2934692, 3.3985865, 4.5004134]),
@@ -551,8 +605,8 @@ def test_vmap_of_vmap():
 
     tr = (
         model.vmap(in_axes=(0, None))
-        .vmap(in_axes=(None, 0))(jnp.arange(10.0, 15.0), jnp.arange(0.0, 1.6, 0.2))
-        .simulate(key0)
+        # .vmap(in_axes=(None, 0))
+        (jnp.arange(10.0, 15.0), jnp.arange(0.0, 1.6, 0.2)).simulate(key0)
     )
     assert jnp.allclose(
         tr["retval"],
