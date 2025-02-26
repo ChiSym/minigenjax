@@ -22,7 +22,7 @@ def model2(b):
 def model3(x):
     a = model1(x) @ "a"
     b = model2(x / 2.0) @ "b"
-    return a + b
+    return a, b
 
 
 @Gen
@@ -122,8 +122,37 @@ def test_uniform_model():
     }
 
 
+def test_multiple_results():
+    tr = model3(50.0).simulate(key0)
+    assert tr["retval"] == (50.12767, 25.866905)
+
+
+def test_logit_vs_probs():
+    def sigmoid(g):
+        return math.exp(g) / (1.0 + math.exp(g))
+
+    @Gen
+    def model():
+        g = Bernoulli(logits=-0.3) @ "l"
+        p = Bernoulli(probs=0.3) @ "p"
+        return g, p
+
+    tr = model().simulate(key0)
+    print(jax.make_jaxpr(model().simulate)(key0))
+    assert tr["subtraces"]["l"]["retval"] == 1.0
+    assert (
+        tr["subtraces"]["l"]["score"]
+        == -0.8543553
+        == pytest.approx(math.log(sigmoid(-0.3)))
+    )
+    assert tr["subtraces"]["p"]["retval"] == 1.0
+    assert tr["subtraces"]["p"]["score"] == -1.2039728 == jnp.array(math.log(0.3))
+
+
 def test_model_vmap():
-    tr = jax.vmap(model3(50.0).simulate)(jax.random.split(key0, 5))
+    tr = jax.vmap(model3(50.0).map(lambda t: t[0] + t[1]).simulate)(
+        jax.random.split(key0, 5)
+    )
     assert jnp.allclose(
         tr["retval"], jnp.array([75.292915, 76.52893, 75.79739, 76.22211, 76.13692])
     )
@@ -639,7 +668,7 @@ def test_bernoulli():
         return b, c
 
     tr = p().simulate(key0)
-    assert tr["retval"] == [0, 0]
+    assert tr["retval"] == (0, 0)
     assert tr["subtraces"]["b"]["score"] == math.log(1 - 0.01)
     assert tr["subtraces"]["c"]["score"] == math.log(
         1 - math.exp(-1) / (1 + math.exp(-1))

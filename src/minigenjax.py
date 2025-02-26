@@ -47,6 +47,14 @@ class GenPrimitive(jx.core.Primitive):
     ) -> tuple[Array, Array]:
         raise NotImplementedError(f"assess_p: {self}")
 
+    def inflate(self, v: Any, n: int):
+        if isinstance(v, jax.core.AbstractValue):
+            a = v
+        else:
+            a = jax.core.get_aval(v)
+        assert isinstance(a, jax.core.ShapedArray)
+        return a.update(shape=(n,) + a.shape)
+
 
 InAxesT = int | Sequence[Any] | None
 
@@ -220,6 +228,7 @@ class GF[R](GFI[R]):
         self.args = args
         self.flat_args, self.in_tree = jax.tree.flatten(self.args)
         self.jaxpr, self.shape = jax.make_jaxpr(f, return_shape=True)(*args)
+        self.structure = jax.tree.structure(self.shape)
         self.multiple_results = isinstance(self.shape, tuple)
         a_vals = [ov.aval for ov in self.jaxpr.jaxpr.outvars]
         self.abstract_value = a_vals if self.multiple_results else a_vals[0]
@@ -232,7 +241,10 @@ class GF[R](GFI[R]):
         return v if self.multiple_results else v[0]
 
     def simulate_p(self, key: PRNGKeyArray, arg_tuple: tuple, address) -> dict:
-        return Simulate(key, address).run(self.jaxpr, arg_tuple)
+        v = Simulate(key, address).run(self.jaxpr, arg_tuple)
+        if self.multiple_results:
+            v["retval"] = jax.tree.unflatten(self.structure, v["retval"])
+        return v
 
     def assess_p(
         self, arg_tuple: tuple, constraint: Constraint, address
@@ -513,7 +525,7 @@ class RepeatGF[R](GFI[R]):
         a = self.gfi.abstract(*args, **kwargs)
         # just because we aren't sure how to deal with structure yet
         assert isinstance(a, jax.core.ShapedArray)
-        return jax.core.ShapedArray((self.n,) + a.shape, a.dtype)
+        return self.inflate(a, self.n)
 
     def simulate_p(self, key: PRNGKeyArray, arg_tuple: tuple, address: Address) -> dict:
         return Simulate(key, address).run(self.get_jaxpr(), arg_tuple)
@@ -540,12 +552,7 @@ class RepeatGF[R](GFI[R]):
             )
 
         def abstract(self, *args, **kwargs):
-            def inflate(aval):
-                return aval.update(shape=(self.r.n,) + aval.shape)
-
-            return [
-                inflate(jax.core.get_aval(s)) for s in jax.tree.flatten(self.shape)[0]
-            ]
+            return [self.inflate(s, self.r.n) for s in jax.tree.flatten(self.shape)[0]]
 
         def concrete(self, *args, **kwargs):
             # this is called after the simulate transformation so the key is the first argument
@@ -616,7 +623,6 @@ class VmapGF[R](GFI[R]):
         return self.shape
 
     def simulate_p(self, key: PRNGKeyArray, arg_tuple: tuple, address: Address) -> dict:
-        # TOOD: make this simulate_p?
         return GF(lambda: self @ "__vmap", ()).simulate(key)
 
     def __matmul__(self, address: str) -> R:
@@ -642,15 +648,7 @@ class VmapGF[R](GFI[R]):
             )
 
         def abstract(self, *args, **kwargs):
-            def inflate(aval: jax.core.AbstractValue):
-                assert isinstance(aval, jax.core.ShapedArray)
-                s = aval.shape
-                return aval.update(shape=(self.n,) + s)
-                return aval
-
-            return [
-                inflate(jax.core.get_aval(s)) for s in jax.tree.flatten(self.shape)[0]
-            ]
+            return [self.inflate(s, self.n) for s in jax.tree.flatten(self.shape)[0]]
 
         def concrete(self, *args, **kwargs):
             # this is called after the simulate transformation so the key is the first argument
