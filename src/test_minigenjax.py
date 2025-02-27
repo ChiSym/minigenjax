@@ -100,7 +100,6 @@ def test_normal_model():
     tr = model1(10.0).simulate(key0)
     expected = {
         "retval": 9.874846,
-        "w": 0,
         "subtraces": {
             "x": {
                 "retval": jnp.array(9.874846),
@@ -115,7 +114,6 @@ def test_uniform_model():
     tr = model2(20.0).simulate(key0)
     assert tr == {
         "retval": 20.210737,
-        "w": 0,
         "subtraces": {
             "x": {
                 "retval": 20.210737,

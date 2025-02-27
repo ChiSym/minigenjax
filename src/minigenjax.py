@@ -411,7 +411,7 @@ class Simulate(Transformation[dict]):
             )
             u = jax.tree.unflatten(jax.tree.structure(shape), ans)
             self.trace[bind_params["at"]] = u["subtraces"]
-            self.w += jnp.sum(u["w"])
+            self.w += jnp.sum(u.get("w", 0))
             return u["retval"]
 
         if isinstance(eqn.primitive, VmapGF):
@@ -426,7 +426,7 @@ class Simulate(Transformation[dict]):
             )
             u = jax.tree.unflatten(jax.tree.structure(shape), ans)
             self.trace[bind_params["at"]] = u["subtraces"]
-            self.w += jnp.sum(u["w"])
+            self.w += jnp.sum(u.get("w", 0))
             return u["retval"]
 
         # we regard the presence of constraints as enabling importance mode,
@@ -488,7 +488,7 @@ class Simulate(Transformation[dict]):
 
             if sub_address:
                 self.trace[sub_address] = ans["subtraces"][sub_address]
-            self.w += jnp.sum(ans["w"])
+            self.w += jnp.sum(ans.get("w", 0))
             # The reasons why this result has to be a sequence is obscure to me,
             # but cond_p as a primitive requires "multiple results."
             return (ans["retval"],)
@@ -515,17 +515,16 @@ class Simulate(Transformation[dict]):
                 self.trace[sub_address] = ans[1]["subtraces"][sub_address]
 
             # we extended the carry with the key; now drop it
-            self.w += ans[1]["w"]
+            self.w += jnp.sum(ans[1].get("w", 0))
             return (ans[0][0], ans[1]["retval"][1])
 
         return super().handle_eqn(eqn, params, bind_params)
 
     def construct_retval(self, retval):
-        return {
-            "retval": retval,
-            "w": self.w,
-            "subtraces": self.trace,
-        }
+        r = {"retval": retval, "subtraces": self.trace}
+        if self.constraint:
+            r["w"] = self.w
+        return r
 
 
 # %%
