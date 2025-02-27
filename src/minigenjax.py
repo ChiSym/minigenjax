@@ -13,6 +13,7 @@ from jaxtyping import Array, ArrayLike, PRNGKeyArray
 # %%
 Address = tuple[str, ...]
 Constraint = dict[str, "ArrayLike|Constraint"] | Callable[[Address], Array | None]
+PHANTOM_KEY = jax.random.key(987654321)
 
 
 class GenPrimitive(jx.core.Primitive):
@@ -94,8 +95,6 @@ class GFI[R](GenPrimitive):
 
 
 class Distribution(GenPrimitive):
-    PHANTOM_KEY = jax.random.key(987654321)
-
     def __init__(self, name, tfd_ctor, scale: str | None = None):
         super().__init__(name)
         self.tfd_ctor = tfd_ctor
@@ -145,7 +144,7 @@ class Distribution(GenPrimitive):
 
         class Binder:
             def __matmul__(self, address: str):
-                return this.bind(this.PHANTOM_KEY, *args, at=address)
+                return this.bind(PHANTOM_KEY, *args, at=address)
 
             def __call__(self, key: PRNGKeyArray):
                 return this.tfd_ctor(*args).sample(seed=key)
@@ -192,9 +191,7 @@ def Categorical(*, logits=None, probs=None):
 
 
 class KeySplitP(jx.core.Primitive):
-    KEY_TYPE = jax.core.get_aval(
-        jax.random.key(0)
-    )  # jax.core.ShapedArray((2,), jnp.uint32)
+    KEY_TYPE = jax.core.get_aval(PHANTOM_KEY)  # jax.core.ShapedArray((2,), jnp.uint32)
 
     def __init__(self):
         super().__init__("KeySplit")
@@ -284,12 +281,23 @@ class GF[R](GFI[R]):
 
 
 class Transformation[R]:
-    def __init__(self, address: Address, constraint: Constraint):
+    def __init__(self, key: PRNGKeyArray, address: Address, constraint: Constraint):
+        self.key = key
         self.address = address
         self.constraint = constraint
 
     def handle_eqn(self, eqn, params, bind_params):
         return eqn.primitive.bind(*params, **bind_params)
+
+    def get_sub_key(self):
+        if self.key_consumer_count > 1:
+            self.key, sub_key = KeySplit.bind(self.key)
+        elif self.key_consumer_count == 1:
+            sub_key = self.key
+        else:
+            raise Exception("more sub_key requests than expected")
+        self.key_consumer_count -= 1
+        return sub_key
 
     def run(self, closed_jaxpr: jx.core.ClosedJaxpr, arg_tuple):
         jaxpr = closed_jaxpr.jaxpr
@@ -306,6 +314,18 @@ class Transformation[R]:
 
         jax.util.safe_map(write, jaxpr.constvars, closed_jaxpr.consts)
         jax.util.safe_map(write, jaxpr.invars, flat_args)
+
+        # count the number of PRNG keys that will be consumed during the
+        # evaluation of this JAXPR alone. We assume that the key that we
+        # were provided with is good for one random number generation. If
+        # there's only one key consumer in this JAXPR, then there's no need
+        # to split it.
+        self.key_consumer_count = sum(
+            isinstance(eqn.primitive, GenPrimitive)
+            or eqn.primitive is jax.lax.cond_p
+            or eqn.primitive is jax.lax.scan_p
+            for eqn in jaxpr.eqns
+        )
 
         for eqn in jaxpr.eqns:
             sub_fns, bind_params = eqn.primitive.get_bind_params(eqn.params)
@@ -345,7 +365,7 @@ class Transformation[R]:
 
 class Assess(Transformation[Array]):
     def __init__(self, address: Address, constraint: Constraint):
-        super().__init__(address, constraint)
+        super().__init__(PHANTOM_KEY, address, constraint)
         self.score = jnp.array(0.0)
 
     def handle_eqn(self, eqn: jx.core.JaxprEqn, params, bind_params):
@@ -365,16 +385,13 @@ class Assess(Transformation[Array]):
 
 
 class Simulate(Transformation[dict]):
-    S_KEY = jax.random.key(99999)
-
     def __init__(
         self,
         key: PRNGKeyArray,
         address: Address,
         constraint: Constraint,
     ):
-        super().__init__(address, constraint)
-        self.key = key
+        super().__init__(key, address, constraint)
         self.trace = {}
         self.w = jnp.array(0.0)
 
@@ -396,11 +413,11 @@ class Simulate(Transformation[dict]):
                 jaxpr, in_avals
             ),
             return_shape=True,
-        )(self.S_KEY, in_avals)
+        )(PHANTOM_KEY, in_avals)
 
     def handle_eqn(self, eqn: jx.core.JaxprEqn, params, bind_params):
         if isinstance(eqn.primitive, RepeatGF):
-            self.key, sub_key = KeySplit.bind(self.key, a="repeat")
+            sub_key = self.get_sub_key()
             addr = self.address + (bind_params["at"],)
             transformed, shape = self.transform_inner(
                 bind_params["inner"], params, addr
@@ -415,7 +432,7 @@ class Simulate(Transformation[dict]):
             return u["retval"]
 
         if isinstance(eqn.primitive, VmapGF):
-            self.key, sub_key = KeySplit.bind(self.key, a="vmap")
+            sub_key = self.get_sub_key()
             addr = self.address + (bind_params["at"],)
             transformed, shape = self.transform_inner(
                 bind_params["inner"], eqn.primitive.reduced_avals(params), addr
@@ -439,14 +456,14 @@ class Simulate(Transformation[dict]):
                 self.w += jnp.sum(score)
                 ans = {"score": score, "retval": retval}
             else:
-                self.key, sub_key = KeySplit.bind(self.key, a="importance")
+                sub_key = self.get_sub_key()
                 retval = eqn.primitive.bind(sub_key, *params[1:], op="Sample")
                 ans = {"retval": retval}
             self.trace[bind_params["at"]] = ans
             return ans["retval"]
 
         if isinstance(eqn.primitive, GenPrimitive):
-            self.key, sub_key = KeySplit.bind(self.key, a="gen_p")
+            sub_key = self.get_sub_key()
             addr = self.address + (bind_params["at"],)
             ans = eqn.primitive.simulate_p(sub_key, params, addr, self.constraint)
             self.trace[bind_params["at"]] = ans
@@ -460,7 +477,7 @@ class Simulate(Transformation[dict]):
             return ans["retval"]
 
         if eqn.primitive is jax.lax.cond_p:
-            self.key, sub_key = KeySplit.bind(self.key, a="cond_p")
+            sub_key = self.get_sub_key()
             branches = bind_params["branches"]
 
             branch_addresses = tuple(map(self.address_from_branch, branches))
