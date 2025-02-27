@@ -1,4 +1,5 @@
 # %%
+# pyright: reportWildcardImportFromLibrary=false
 import dataclasses
 import math
 import jax
@@ -99,6 +100,7 @@ def test_normal_model():
     tr = model1(10.0).simulate(key0)
     expected = {
         "retval": 9.874846,
+        "w": 0,
         "subtraces": {
             "x": {
                 "retval": jnp.array(9.874846),
@@ -113,6 +115,7 @@ def test_uniform_model():
     tr = model2(20.0).simulate(key0)
     assert tr == {
         "retval": 20.210737,
+        "w": 0,
         "subtraces": {
             "x": {
                 "retval": 20.210737,
@@ -679,6 +682,21 @@ def test_bernoulli():
 
     with pytest.raises(ValueError):
         Bernoulli(logits=-1, probs=0.5)
+
+
+def test_importance():
+    @Gen
+    def model():
+        a = Normal(0.0, 1.0) @ "a"
+        b = Normal(0.0, 0.1) @ "b"
+        return a, b
+
+    tr1 = model().importance(key0, {"a": 1.0})
+    assert tr1["w"] == -1.4189385
+    tr2 = model().importance(key0, {"b": 1.0})
+    assert tr2["w"] == -48.616352
+    tr3 = model().importance(key0, {"a": 1.0, "b": 1.0})
+    assert tr3["w"] == tr1["w"] + tr2["w"]
 
 
 # %%
