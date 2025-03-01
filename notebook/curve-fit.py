@@ -92,5 +92,6 @@ tr["subtraces"]["y"]["y"]["retval"]
 key, sub_key = jax.random.split(key)
 model(xs).importance(sub_key, {"y": {"y": {"value": ys}}})
 # %%
+print(jax.make_jaxpr(lambda k: model(xs).simulate(k)['retval'])(sub_key))
 
 # %%
