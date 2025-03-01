@@ -636,7 +636,10 @@ class RepeatGF[R](GFI[R]):
             )
 
         def abstract(self, *args, **kwargs):
-            return [self.inflate(jax.core.get_aval(s), self.r.n) for s in jax.tree.flatten(self.shape)[0]]
+            return [
+                self.inflate(jax.core.get_aval(s), self.r.n)
+                for s in jax.tree.flatten(self.shape)[0]
+            ]
 
         def concrete(self, *args, **kwargs):
             # this is called after the simulate transformation so the key is the first argument
@@ -739,7 +742,10 @@ class VmapGF[R](GFI[R]):
             )
 
         def abstract(self, *args, **kwargs):
-            return [self.inflate(jax.core.get_aval(s), self.n) for s in jax.tree.flatten(self.shape)[0]]
+            return [
+                self.inflate(jax.core.get_aval(s), self.n)
+                for s in jax.tree.flatten(self.shape)[0]
+            ]
 
         def concrete(self, *args, **kwargs):
             # this is called after the simulate transformation so the key is the first argument
