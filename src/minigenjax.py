@@ -54,12 +54,15 @@ class GenPrimitive(jx.core.Primitive):
         raise NotImplementedError(f"assess_p: {self}")
 
     def inflate(self, v: Any, n: int):
-        if isinstance(v, jax.core.AbstractValue):
-            a = v
-        else:
-            a = jax.core.get_aval(v)
-        assert isinstance(a, jax.core.ShapedArray)
-        return a.update(shape=(n,) + a.shape)
+        def inflate_one(v):
+            if isinstance(v, jax.core.ShapedArray):
+                return v.update(shape=(n,) + v.shape)
+            elif isinstance(v, jax.ShapeDtypeStruct):
+                return jax.ShapeDtypeStruct(shape=(n,) + v.shape, dtype=v.dtype)
+
+        if isinstance(v, tuple):
+            return tuple(map(inflate_one, v))
+        return inflate_one(v)
 
 
 InAxesT = int | Sequence[Any] | None
@@ -600,10 +603,7 @@ class RepeatGF[R](GFI[R]):
         )(*self.get_args())
 
     def abstract(self, *args, **kwargs):
-        a = self.gfi.abstract(*args, **kwargs)
-        # just because we aren't sure how to deal with structure yet
-        assert isinstance(a, jax.core.ShapedArray)
-        return self.inflate(a, self.n)
+        return self.inflate(self.gfi.abstract(*args, **kwargs), self.n)
 
     def simulate_p(
         self,
@@ -636,7 +636,7 @@ class RepeatGF[R](GFI[R]):
             )
 
         def abstract(self, *args, **kwargs):
-            return [self.inflate(s, self.r.n) for s in jax.tree.flatten(self.shape)[0]]
+            return [self.inflate(jax.core.get_aval(s), self.r.n) for s in jax.tree.flatten(self.shape)[0]]
 
         def concrete(self, *args, **kwargs):
             # this is called after the simulate transformation so the key is the first argument
@@ -739,7 +739,7 @@ class VmapGF[R](GFI[R]):
             )
 
         def abstract(self, *args, **kwargs):
-            return [self.inflate(s, self.n) for s in jax.tree.flatten(self.shape)[0]]
+            return [self.inflate(jax.core.get_aval(s), self.n) for s in jax.tree.flatten(self.shape)[0]]
 
         def concrete(self, *args, **kwargs):
             # this is called after the simulate transformation so the key is the first argument
