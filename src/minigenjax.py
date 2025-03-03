@@ -12,7 +12,7 @@ from jaxtyping import Array, ArrayLike, PRNGKeyArray
 
 # %%
 Address = tuple[str, ...]
-Constraint = dict[str, "ArrayLike|Constraint"] | Callable[[Address], Array | None]
+Constraint = dict[str, "ArrayLike|Constraint"]
 PHANTOM_KEY = jax.random.key(987654321)
 
 
@@ -349,18 +349,25 @@ class Transformation[R]:
         retval = retval if len(jaxpr.outvars) > 1 else retval[0]
         return self.construct_retval(retval)
 
-    def apply_constraint(self, addr):
+    def apply_constraint(self, addr: str) -> ArrayLike | None:
+        print(
+            f"looking for constraint in {self.address} -> {addr} in {self.constraint}"
+        )
         if isinstance(self.constraint, dict):
-            c = self.constraint
-            for a in addr:
-                if not isinstance(c, dict):
-                    raise Exception("broken constraint: {a} is not a leaf")
-                c = c.get(a)
-                if c is None:
-                    return None
-            return c
+            v = self.constraint.get(addr)
+            if isinstance(v, dict):
+                raise Exception(
+                    "broken constraint: {addr} in {self.address} is not a leaf"
+                )
+            return v
         else:
             return self.constraint
+
+    def get_sub_constraint(self, a: str) -> Constraint:
+        d = self.constraint.get(a, {})
+        if not isinstance(d, dict):
+            return {}
+        return d
 
     def construct_retval(self, retval) -> R:
         return retval
@@ -374,13 +381,16 @@ class Assess(Transformation[Array]):
     def handle_eqn(self, eqn: jx.core.JaxprEqn, params, bind_params):
         if isinstance(eqn.primitive, Distribution):
             addr = self.address + (bind_params["at"],)
-            v = self.apply_constraint(addr)
+            v = self.apply_constraint(bind_params["at"])
             self.score += eqn.primitive.bind(v, *params[1:], op="Score")
             return v
 
         if isinstance(eqn.primitive, GenPrimitive):
-            addr = self.address + (bind_params["at"],)
-            ans, score = eqn.primitive.assess_p(params, self.constraint, addr)
+            a = bind_params["at"]
+            addr = self.address + (a,)
+            sub_constraint = self.constraint.get(a, {})
+            assert isinstance(sub_constraint, dict)
+            ans, score = eqn.primitive.assess_p(params, sub_constraint, addr)
             self.score += score
             return ans
 
@@ -436,7 +446,8 @@ class Simulate(Transformation[dict]):
 
         if isinstance(eqn.primitive, VmapGF):
             sub_key = self.get_sub_key()
-            addr = self.address + (bind_params["at"],)
+            at = bind_params["at"]
+            addr = self.address + (at,)
             transformed, shape = self.transform_inner(
                 bind_params["inner"], eqn.primitive.reduced_avals(params), addr
             )
@@ -445,7 +456,7 @@ class Simulate(Transformation[dict]):
                 sub_key, *params, **new_params
             )
             u = jax.tree.unflatten(jax.tree.structure(shape), ans)
-            self.trace[bind_params["at"]] = u["subtraces"]
+            self.trace[at] = u
             self.w += jnp.sum(u.get("w", 0))
             return u["retval"]
 
@@ -453,8 +464,9 @@ class Simulate(Transformation[dict]):
         # so you can't do an importance over empty constraints to get a zero
         # score; instead, that will be interpreted as a regular simulate.
         if isinstance(eqn.primitive, Distribution) and self.constraint:
-            addr = self.address + (bind_params["at"],)
-            if (retval := self.apply_constraint(addr)) is not None:
+            at = bind_params["at"]
+            addr = self.address + (at,)
+            if (retval := self.apply_constraint(at)) is not None:
                 score = eqn.primitive.bind(retval, *params[1:], op="Score")
                 self.w += jnp.sum(score)
                 ans = {"score": score, "retval": retval}
@@ -467,8 +479,11 @@ class Simulate(Transformation[dict]):
 
         if isinstance(eqn.primitive, GenPrimitive):
             sub_key = self.get_sub_key()
-            addr = self.address + (bind_params["at"],)
-            ans = eqn.primitive.simulate_p(sub_key, params, addr, self.constraint)
+            at = bind_params["at"]
+            addr = self.address + (at,)
+            ans = eqn.primitive.simulate_p(
+                sub_key, params, addr, self.get_sub_constraint(at)
+            )
             self.trace[bind_params["at"]] = ans
             # TODO: this `get` comes about because if we are a Distribution, but
             # are not running in importance mode, there will be no 'w' sub-entry.
@@ -517,9 +532,9 @@ class Simulate(Transformation[dict]):
             self.key, sub_key = KeySplit.bind(self.key, a="scan_p")
             inner = bind_params["jaxpr"]
 
-            if a := self.address_from_branch(inner):
-                address = self.address + (a,)
-                sub_address = a
+            if at := self.address_from_branch(inner):
+                address = self.address + (at,)
+                sub_address = at
             else:
                 address = self.address
                 sub_address = None
@@ -717,7 +732,9 @@ class VmapGF[R](GFI[R]):
         constraint: Constraint,
     ) -> dict:
         # TODO: fishy: can we fix this?
-        return GF(lambda: self @ "__vmap", ()).simulate_p(key, (), address, constraint)
+        return GF(lambda: self @ "__vmap", ()).simulate_p(key, (), address, constraint)[
+            "subtraces"
+        ]["__vmap"]
 
     def __matmul__(self, address: str) -> R:
         return self.bind(

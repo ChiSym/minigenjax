@@ -384,7 +384,7 @@ class TestCurve:
             f, jnp.arange(-3.0, 3.0), 0.01, 0.01
         ).simulate(key0)
         assert jnp.allclose(
-            tr["subtraces"]["__vmap"]["outlier"]["retval"],
+            tr["subtraces"]["outlier"]["retval"],
             jnp.array([0, 0, 0, 0, 0, 0]),
         )
         assert jnp.allclose(
@@ -394,9 +394,7 @@ class TestCurve:
         tr = curve_model.vmap(in_axes=(None, None, 0, None))(
             f, 0.0, jnp.array([0.001, 0.01, 0.9]), 0.3
         ).simulate(key0)
-        assert jnp.allclose(
-            tr["subtraces"]["__vmap"]["outlier"]["retval"], jnp.array([0, 0, 1])
-        )
+        assert jnp.allclose(tr["subtraces"]["outlier"]["retval"], jnp.array([0, 0, 1]))
         assert jnp.allclose(tr["retval"], jnp.array([0.9980389, 0.91635126, 1.0424924]))
 
     def test_curve_generation(self):
@@ -439,7 +437,7 @@ class TestCurve:
             ),
         )
         assert jnp.allclose(
-            tr["subtraces"]["y"]["outlier"]["retval"],
+            tr["subtraces"]["y"]["subtraces"]["outlier"]["retval"],
             jnp.array([1.0, 1.0, 0.0, 0.0, 1.0, 0.0, 1.0]),
         )
         assert jnp.allclose(
