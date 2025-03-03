@@ -92,7 +92,7 @@ class Distribution(GenPrimitive):
             case "Score":
                 return self.tfd_ctor(*args[1:]).log_prob(args[0])
             case _:
-                raise NotImplementedError(f'{self.name}.{kwargs["op"]}')
+                raise NotImplementedError(f"{self.name}.{kwargs['op']}")
 
     def simulate_p(self, key: PRNGKeyArray, arg_tuple: tuple):
         v = self.bind(key, *arg_tuple[1:], op="Sample")
