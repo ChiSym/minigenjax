@@ -419,7 +419,7 @@ class TestCurve:
 
         tr = jit_model(key0)
         assert jnp.allclose(
-            tr["subtraces"]["p"]["c"]["retval"],
+            tr["subtraces"]["p"]["subtraces"]["c"]["retval"],
             jnp.array([0.785558, 2.3734226, 0.07902155]),
         )
         assert jnp.allclose(
@@ -456,7 +456,7 @@ class TestCurve:
         )
 
         tr = jax.vmap(jit_model)(jax.random.split(key0, 10))
-        assert tr["subtraces"]["p"]["c"]["retval"].shape == (10, 3)
+        assert tr["subtraces"]["p"]["subtraces"]["c"]["retval"].shape == (10, 3)
         assert tr["retval"].shape == (10, 7)
 
 

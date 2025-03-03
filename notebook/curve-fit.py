@@ -54,7 +54,7 @@ def model(xs):
         curve_model.vmap(in_axes=(None, 0, None, None))(
             poly, xs, p_outlier, sigma_inlier
         )
-        @ "y"
+        @ "ys"
     )
 
 
@@ -84,13 +84,13 @@ key, sub_key = jax.random.split(key)
 tr = prior(sub_key)
 # %%
 # this is the polynomial (but it has lost the type, which is a bug)
-tr["subtraces"]["p"]["c"]["retval"]
+tr["subtraces"]["p"]["subtraces"]["c"]["retval"]
 # %%
 # These are the y values
-tr["subtraces"]["y"]["y"]["retval"]
+tr["subtraces"]["ys"]["retval"]
 # %%
 key, sub_key = jax.random.split(key)
-model(xs).importance(sub_key, {"y": {"y": {"value": ys}}})
+model(xs).importance(sub_key, {"ys": {"y": {"value": 0.2}}})
 # %%
 print(jax.make_jaxpr(lambda k: model(xs).simulate(k)["retval"])(sub_key))
 

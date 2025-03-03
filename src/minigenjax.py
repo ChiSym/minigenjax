@@ -350,9 +350,6 @@ class Transformation[R]:
         return self.construct_retval(retval)
 
     def apply_constraint(self, addr: str) -> ArrayLike | None:
-        print(
-            f"looking for constraint in {self.address} -> {addr} in {self.constraint}"
-        )
         if isinstance(self.constraint, dict):
             v = self.constraint.get(addr)
             if isinstance(v, dict):
@@ -417,39 +414,36 @@ class Simulate(Transformation[dict]):
         if len(b.jaxpr.eqns) == 1 and isinstance(b.jaxpr.eqns[0].primitive, GF):
             return b.jaxpr.eqns[0].params.get("at")
 
-    def transform_inner(self, jaxpr, in_avals, address):
+    def transform_inner(self, jaxpr, in_avals, addr: str):
         """Apply simulate to jaxpr and return the transformed jaxpr together
         with its return shape."""
 
         return jax.make_jaxpr(
-            lambda key, in_avals: Simulate(key, address, self.constraint).run(
-                jaxpr, in_avals
-            ),
+            lambda key, in_avals: Simulate(
+                key, self.address + (addr,), self.get_sub_constraint(addr)
+            ).run(jaxpr, in_avals),
             return_shape=True,
         )(PHANTOM_KEY, in_avals)
 
     def handle_eqn(self, eqn: jx.core.JaxprEqn, params, bind_params):
         if isinstance(eqn.primitive, RepeatGF):
             sub_key = self.get_sub_key()
-            addr = self.address + (bind_params["at"],)
-            transformed, shape = self.transform_inner(
-                bind_params["inner"], params, addr
-            )
+            at = bind_params["at"]
+            transformed, shape = self.transform_inner(bind_params["inner"], params, at)
             new_params = bind_params | {"inner": transformed}
-            ans = RepeatGF.Simulate(eqn.primitive, shape).bind(
+            ans = eqn.primitive.Simulate(eqn.primitive, shape).bind(
                 sub_key, *params, **new_params
             )
             u = jax.tree.unflatten(jax.tree.structure(shape), ans)
-            self.trace[bind_params["at"]] = u["subtraces"]
+            self.trace[at] = u  # u["subtraces"]
             self.w += jnp.sum(u.get("w", 0))
             return u["retval"]
 
         if isinstance(eqn.primitive, VmapGF):
             sub_key = self.get_sub_key()
             at = bind_params["at"]
-            addr = self.address + (at,)
             transformed, shape = self.transform_inner(
-                bind_params["inner"], eqn.primitive.reduced_avals(params), addr
+                bind_params["inner"], eqn.primitive.reduced_avals(params), at
             )
             new_params = bind_params | {"inner": transformed}
             ans = eqn.primitive.Simulate(eqn.primitive, shape).bind(
@@ -502,21 +496,18 @@ class Simulate(Transformation[dict]):
             if branch_addresses[0] and all(
                 b == branch_addresses[0] for b in branch_addresses[1:]
             ):
-                # address = self.address + (branch_addresses[0],)
-                address = self.address
                 sub_address = branch_addresses[0]
             else:
-                address = self.address
                 sub_address = None
 
             # TODO: is it OK to pass the same sub_key to both sides?
             # NB! branches[0] is the false branch, [1] is the true branch,
             ans = jax.lax.cond(
                 params[0],
-                lambda: Simulate(sub_key, address, self.constraint).run(
+                lambda: Simulate(sub_key, self.address, self.constraint).run(
                     branches[1], params[1:]
                 ),
-                lambda: Simulate(sub_key, address, self.constraint).run(
+                lambda: Simulate(sub_key, self.address, self.constraint).run(
                     branches[0], params[1:]
                 ),
             )
