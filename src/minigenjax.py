@@ -55,10 +55,7 @@ class GenPrimitive(jx.core.Primitive):
 
     def inflate(self, v: Any, n: int):
         def inflate_one(v):
-            if isinstance(v, jax.core.ShapedArray):
-                return v.update(shape=(n,) + v.shape)
-            elif isinstance(v, jax.ShapeDtypeStruct):
-                return jax.ShapeDtypeStruct(shape=(n,) + v.shape, dtype=v.dtype)
+            return v.update(shape=(n,) + v.shape)
 
         if isinstance(v, tuple):
             return tuple(map(inflate_one, v))
@@ -249,10 +246,6 @@ class GF[R](GFI[R]):
 
     def abstract(self, *args, at: str, **_kwargs):
         return self.abstract_value
-
-    def concrete(self, *args):
-        v = jax.core.eval_jaxpr(self.jaxpr.jaxpr, self.jaxpr.consts, *args)
-        return v if self.multiple_results else v[0]
 
     def simulate_p(
         self,
@@ -463,7 +456,7 @@ class Simulate(Transformation[dict]):
             if (retval := self.apply_constraint(at)) is not None:
                 score = eqn.primitive.bind(retval, *params[1:], op="Score")
                 self.w += jnp.sum(score)
-                ans = {"score": score, "retval": retval}
+                ans = {"w": score, "retval": retval}
             else:
                 sub_key = self.get_sub_key()
                 retval = eqn.primitive.bind(sub_key, *params[1:], op="Sample")
@@ -595,7 +588,7 @@ def Scan(gf: Gen):
 
 
 class RepeatGF[R](GFI[R]):
-    SUBTRACE = "__repeat"
+    SUB_TRACE = "__repeat"
 
     def __init__(self, gfi: GFI[R], n: int):
         super().__init__(f"Repeat[{gfi.name}, {n}]")
@@ -605,7 +598,7 @@ class RepeatGF[R](GFI[R]):
         # TODO: try to reuse self.__matmul__ here, if possible
         self.jaxpr, self.shape = jax.make_jaxpr(
             lambda *args: self.bind(
-                *args, n=self.n, at=RepeatGF.SUBTRACE, inner=self.gfi.get_jaxpr()
+                *args, n=self.n, at=RepeatGF.SUB_TRACE, inner=self.gfi.get_jaxpr()
             ),
             return_shape=True,
         )(*self.get_args())
@@ -622,7 +615,7 @@ class RepeatGF[R](GFI[R]):
     ) -> dict:
         return Simulate(key, address, constraint).run(self.jaxpr, arg_tuple)[
             "subtraces"
-        ][RepeatGF.SUBTRACE]
+        ][RepeatGF.SUB_TRACE]
 
     def __matmul__(self, address: str) -> R:
         return self.bind(
@@ -661,7 +654,7 @@ class RepeatGF[R](GFI[R]):
 
 
 class VmapGF[R](GFI[R]):
-    SUBTRACE = "__vmap"
+    SUB_TRACE = "__vmap"
 
     def __init__(self, g: Gen, arg_tuple: tuple, in_axes: InAxesT):
         super().__init__(f"Vmap[{g.f.__name__}]")
@@ -693,7 +686,7 @@ class VmapGF[R](GFI[R]):
         )
         self.jaxpr, self.shape = jax.make_jaxpr(
             lambda *args: self.bind(
-                *args, in_axes=self.in_axes, at=VmapGF.SUBTRACE, inner=self.inner_jaxpr
+                *args, in_axes=self.in_axes, at=VmapGF.SUB_TRACE, inner=self.inner_jaxpr
             ),
             return_shape=True,
         )(*self.flat_args)
@@ -730,7 +723,7 @@ class VmapGF[R](GFI[R]):
     ) -> dict:
         return Simulate(key, address, constraint).run(self.jaxpr, arg_tuple)[
             "subtraces"
-        ][VmapGF.SUBTRACE]
+        ][VmapGF.SUB_TRACE]
 
     def __matmul__(self, address: str) -> R:
         return self.bind(
