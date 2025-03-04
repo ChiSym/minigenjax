@@ -5,6 +5,7 @@ import genstudio.plot as Plot
 import jax.numpy as jnp
 import dataclasses
 import minigenjax as mg
+# from pprint import pprint as pp
 # %%
 
 
@@ -82,6 +83,8 @@ ys = jax.vmap(goal)(xs)
 # %%
 key, sub_key = jax.random.split(key)
 tr = prior(sub_key)
+
+mg.to_constraint(tr)
 # %%
 # this is the polynomial (but it has lost the type, which is a bug)
 tr["subtraces"]["p"]["subtraces"]["c"]["retval"]
@@ -90,7 +93,7 @@ tr["subtraces"]["p"]["subtraces"]["c"]["retval"]
 tr["subtraces"]["ys"]["retval"]
 # %%
 key, sub_key = jax.random.split(key)
-model(xs).importance(sub_key, {"ys": {"y": {"value": 0.2}}})
+jax.jit(model(xs).importance)(sub_key, {"ys": {"y": {"value": -0.3}}})
 # %%
 print(jax.make_jaxpr(lambda k: model(xs).simulate(k)["retval"])(sub_key))
 

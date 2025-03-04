@@ -76,7 +76,7 @@ class GFI[R](GenPrimitive):
         return self.simulate_p(key, self.get_args(), (), {})
 
     def importance(self, key: PRNGKeyArray, constraint: Constraint) -> dict:
-        return Simulate(key, (), constraint).run(self.get_jaxpr(), self.get_args())
+        return self.simulate_p(key, self.get_args(), (), constraint)
 
     def assess(self, constraint) -> Array:
         return self.assess_p(self.get_args(), constraint, ())[1]
@@ -349,6 +349,15 @@ class Transformation[R]:
         retval = retval if len(jaxpr.outvars) > 1 else retval[0]
         return self.construct_retval(retval)
 
+    def address_from_branch(self, b: jx.core.ClosedJaxpr):
+        """Look at the given JAXPR and find out if it is a single-instruction
+        call to a GF traced to an address. If so, return that address. This is
+        used to detect when certain JAX primitives (e.g., `scan_p`, `cond_p`)
+        have been applied directly to traced generative functions, in which case
+        the current transformation should be propagated to the jaxpr within."""
+        if len(b.jaxpr.eqns) == 1 and isinstance(b.jaxpr.eqns[0].primitive, GF):
+            return b.jaxpr.eqns[0].params.get("at")
+
     def apply_constraint(self, addr: str) -> ArrayLike | None:
         if isinstance(self.constraint, dict):
             v = self.constraint.get(addr)
@@ -404,15 +413,6 @@ class Simulate(Transformation[dict]):
         super().__init__(key, address, constraint)
         self.trace = {}
         self.w = jnp.array(0.0)
-
-    def address_from_branch(self, b: jx.core.ClosedJaxpr):
-        """Look at the given JAXPR and find out if it is a single-instruction
-        call to a GF traced to an address. If so, return that address. This is
-        used to detect when certain JAX primitives (e.g., `scan_p`, `cond_p`)
-        have been applied directly to traced generative functions, in which case
-        the current transformation should be propagated to the jaxpr within."""
-        if len(b.jaxpr.eqns) == 1 and isinstance(b.jaxpr.eqns[0].primitive, GF):
-            return b.jaxpr.eqns[0].params.get("at")
 
     def transform_inner(self, jaxpr, in_avals, addr: str):
         """Apply simulate to jaxpr and return the transformed jaxpr together
@@ -595,6 +595,8 @@ def Scan(gf: Gen):
 
 
 class RepeatGF[R](GFI[R]):
+    SUBTRACE = "__repeat"
+
     def __init__(self, gfi: GFI[R], n: int):
         super().__init__(f"Repeat[{gfi.name}, {n}]")
         self.gfi = gfi
@@ -603,7 +605,7 @@ class RepeatGF[R](GFI[R]):
         # TODO: try to reuse self.__matmul__ here, if possible
         self.jaxpr, self.shape = jax.make_jaxpr(
             lambda *args: self.bind(
-                *args, n=self.n, at="__r_gf", inner=self.gfi.get_jaxpr()
+                *args, n=self.n, at=RepeatGF.SUBTRACE, inner=self.gfi.get_jaxpr()
             ),
             return_shape=True,
         )(*self.get_args())
@@ -618,7 +620,9 @@ class RepeatGF[R](GFI[R]):
         address: Address,
         constraint: Constraint,
     ) -> dict:
-        return Simulate(key, address, constraint).run(self.get_jaxpr(), arg_tuple)
+        return Simulate(key, address, constraint).run(self.jaxpr, arg_tuple)[
+            "subtraces"
+        ][RepeatGF.SUBTRACE]
 
     def __matmul__(self, address: str) -> R:
         return self.bind(
@@ -657,6 +661,8 @@ class RepeatGF[R](GFI[R]):
 
 
 class VmapGF[R](GFI[R]):
+    SUBTRACE = "__vmap"
+
     def __init__(self, g: Gen, arg_tuple: tuple, in_axes: InAxesT):
         super().__init__(f"Vmap[{g.f.__name__}]")
         if in_axes is None or in_axes == ():
@@ -687,7 +693,7 @@ class VmapGF[R](GFI[R]):
         )
         self.jaxpr, self.shape = jax.make_jaxpr(
             lambda *args: self.bind(
-                *args, in_axes=self.in_axes, at="__vmap_gf", inner=self.inner_jaxpr
+                *args, in_axes=self.in_axes, at=VmapGF.SUBTRACE, inner=self.inner_jaxpr
             ),
             return_shape=True,
         )(*self.flat_args)
@@ -722,10 +728,9 @@ class VmapGF[R](GFI[R]):
         address: Address,
         constraint: Constraint,
     ) -> dict:
-        # TODO: fishy: can we fix this?
-        return GF(lambda: self @ "__vmap", ()).simulate_p(key, (), address, constraint)[
+        return Simulate(key, address, constraint).run(self.jaxpr, arg_tuple)[
             "subtraces"
-        ]["__vmap"]
+        ][VmapGF.SUBTRACE]
 
     def __matmul__(self, address: str) -> R:
         return self.bind(
@@ -799,3 +804,9 @@ class MapGF[R, S](GFI[S]):
         return jax.make_jaxpr(
             lambda args: self.f(*jax.core.eval_jaxpr(ij.jaxpr, ij.consts, *args))
         )(self.gfi.get_args())
+
+
+def to_constraint(trace: dict) -> Constraint:
+    if "subtraces" in trace:
+        return {k: to_constraint(v) for k, v in trace["subtraces"].items()}
+    return trace["retval"]

@@ -473,7 +473,7 @@ def test_map():
     assert jnp.allclose(tr["retval"], jnp.array([15.0111885, 15.005781, 15.008535]))
 
 
-def test_repeat():
+def test_simple_repeat():
     @Gen
     def coefficient():
         return Normal(0.0, 1.0) @ "c"
@@ -685,12 +685,36 @@ def test_importance():
         b = Normal(0.0, 0.1) @ "b"
         return a, b
 
-    tr1 = model().importance(key0, {"a": 1.0})
+    @Gen
+    def outer():
+        c = Normal(0.0, 1.0) @ "c"
+        a, b = model() @ "d"
+        return a + b + c
+
+    model_imp = jax.jit(model().importance)
+    outer_imp = jax.jit(outer().importance)
+
+    tr1 = model_imp(key0, {"a": 1.0})
     assert tr1["w"] == -1.4189385
-    tr2 = model().importance(key0, {"b": 1.0})
+    tr2 = model_imp(key0, {"b": 1.0})
     assert tr2["w"] == -48.616352
-    tr3 = model().importance(key0, {"a": 1.0, "b": 1.0})
+    tr3 = model_imp(key0, {"a": 1.0, "b": 1.0})
     assert tr3["w"] == tr1["w"] + tr2["w"]
+
+    tr4 = outer_imp(key0, {"c": 0.5, "d": {"b": 0.3}})
+
+    assert tr4["w"] == -4.160292
+
+
+def test_repeat_importance():
+    @Gen
+    def model(a):
+        return Normal(a, 0.1) @ "a"
+
+    mr = model(1.0).repeat(4)
+    mr_imp = jax.jit(mr.importance)
+    tr = mr_imp(key0, {"b": 0.2})
+    print(tr)
 
 
 # %%
