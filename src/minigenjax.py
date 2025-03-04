@@ -420,12 +420,11 @@ class Simulate(Transformation[dict]):
 
     def handle_eqn(self, eqn: jx.core.JaxprEqn, params, bind_params):
         if isinstance(eqn.primitive, RepeatGF):
-            sub_key = self.get_sub_key()
             at = bind_params["at"]
             transformed, shape = self.transform_inner(bind_params["inner"], params, at)
             new_params = bind_params | {"inner": transformed}
             ans = eqn.primitive.Simulate(eqn.primitive, shape).bind(
-                sub_key, *params, **new_params
+                self.get_sub_key(), *params, **new_params
             )
             u = jax.tree.unflatten(jax.tree.structure(shape), ans)
             self.trace[at] = u  # u["subtraces"]
@@ -433,14 +432,13 @@ class Simulate(Transformation[dict]):
             return u["retval"]
 
         if isinstance(eqn.primitive, VmapGF):
-            sub_key = self.get_sub_key()
             at = bind_params["at"]
             transformed, shape = self.transform_inner(
                 bind_params["inner"], eqn.primitive.reduced_avals(params), at
             )
             new_params = bind_params | {"inner": transformed}
             ans = eqn.primitive.Simulate(eqn.primitive, shape).bind(
-                sub_key, *params, **new_params
+                self.get_sub_key(), *params, **new_params
             )
             u = jax.tree.unflatten(jax.tree.structure(shape), ans)
             self.trace[at] = u
@@ -458,18 +456,18 @@ class Simulate(Transformation[dict]):
                 self.w += jnp.sum(score)
                 ans = {"w": score, "retval": retval}
             else:
-                sub_key = self.get_sub_key()
-                retval = eqn.primitive.bind(sub_key, *params[1:], op="Sample")
+                retval = eqn.primitive.bind(
+                    self.get_sub_key(), *params[1:], op="Sample"
+                )
                 ans = {"retval": retval}
             self.trace[bind_params["at"]] = ans
             return ans["retval"]
 
         if isinstance(eqn.primitive, GenPrimitive):
-            sub_key = self.get_sub_key()
             at = bind_params["at"]
             addr = self.address + (at,)
             ans = eqn.primitive.simulate_p(
-                sub_key, params, addr, self.get_sub_constraint(at)
+                self.get_sub_key(), params, addr, self.get_sub_constraint(at)
             )
             self.trace[bind_params["at"]] = ans
             # TODO: this `get` comes about because if we are a Distribution, but
@@ -482,7 +480,6 @@ class Simulate(Transformation[dict]):
             return ans["retval"]
 
         if eqn.primitive is jax.lax.cond_p:
-            sub_key = self.get_sub_key()
             branches = bind_params["branches"]
 
             branch_addresses = tuple(map(self.address_from_branch, branches))
@@ -495,6 +492,7 @@ class Simulate(Transformation[dict]):
 
             # TODO: is it OK to pass the same sub_key to both sides?
             # NB! branches[0] is the false branch, [1] is the true branch,
+            sub_key = self.get_sub_key()
             ans = jax.lax.cond(
                 params[0],
                 lambda: Simulate(sub_key, self.address, self.constraint).run(
@@ -513,7 +511,6 @@ class Simulate(Transformation[dict]):
             return (ans["retval"],)
 
         if eqn.primitive is jax.lax.scan_p:
-            self.key, sub_key = KeySplit.bind(self.key, a="scan_p")
             inner = bind_params["jaxpr"]
 
             if at := self.address_from_branch(inner):
@@ -529,7 +526,7 @@ class Simulate(Transformation[dict]):
                 v = Simulate(k1, address, self.constraint).run(inner, (carry, s))
                 return ((v["retval"][0], key), v)
 
-            ans = jax.lax.scan(step, (params[0], sub_key), params[1])
+            ans = jax.lax.scan(step, (params[0], self.get_sub_key()), params[1])
             if sub_address:
                 self.trace[sub_address] = ans[1]["subtraces"][sub_address]
 

@@ -339,18 +339,18 @@ def test_scan_model():
         return Scan(update)(10.0, jnp.arange(0.1, 0.6, 0.1)) @ "S"
 
     tr = scan_update().simulate(key0)
-    assert jnp.allclose(tr["retval"][0], 11.550058)
+    assert jnp.allclose(tr["retval"][0], 11.482168)
     assert jnp.allclose(
         tr["retval"][1],
-        jnp.array([10.112767, 10.334088, 10.629716, 11.035657, 11.550058]),
+        jnp.array([10.087484, 10.281618, 10.586483, 10.988654, 11.482168]),
     )
     assert jnp.allclose(
         tr["subtraces"]["S"]["subtraces"]["drift"]["retval"],
-        jnp.array([0.11276714, 0.22132142, 0.2956278, 0.40594086, 0.5144017]),
+        jnp.array([0.08748461, 0.19413349, 0.30486485, 0.4021714, 0.49351367]),
     )
     assert jnp.allclose(
         tr["subtraces"]["S"]["subtraces"]["drift"]["score"],
-        jnp.array([2.8712325, 1.4132173, 3.5906503, 3.5097625, 2.6491904]),
+        jnp.array([2.903057, 3.514152, 3.5678985, 3.6626565, 3.4758694]),
     )
 
 
