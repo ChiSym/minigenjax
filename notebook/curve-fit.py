@@ -5,10 +5,10 @@ import genstudio.plot as Plot
 import jax.numpy as jnp
 import dataclasses
 import minigenjax as mg
+
+
 # from pprint import pprint as pp
 # %%
-
-
 @mg.Gen
 def inlier_model(y, sigma_inlier):
     return mg.Normal(y, sigma_inlier) @ "value"
@@ -49,7 +49,7 @@ class Poly:
 @mg.Gen
 def model(xs):
     poly = quadratic @ "p"
-    p_outlier = mg.Uniform(0.0, 1.0) @ "p_outlier"
+    p_outlier = mg.Uniform(0.0, 0.3) @ "p_outlier"
     sigma_inlier = mg.Uniform(0.0, 0.3) @ "sigma_inlier"
     return (
         curve_model.vmap(in_axes=(None, 0, None, None))(
@@ -73,11 +73,29 @@ def goal(x):
 
 ys = jax.vmap(goal)(xs)
 
-(
-    Plot.line([(x, goal(x)) for x in jnp.arange(-1.0, 1.0, 0.1)])
-    + Plot.dot(zip(xs, ys))
-    + Plot.domain([-1, 1])
-)
+# %%
+key, sub_key = jax.random.split(key)
+prior_ps = jax.vmap(prior)(jax.random.split(sub_key, 100))["subtraces"]["p"]["retval"]
+
+
+# NOTE: the Poly constructor below is a bug. The retval should have come in Poly form not a bare array.
+def plot_curves(curves):
+    return (
+        Plot.line([(x, goal(x)) for x in jnp.arange(-1.0, 1.0, 0.1)])
+        + [
+            Plot.line(
+                [(x, Poly(p)(x)) for x in jnp.arange(-1.0, 1.0, 0.1)],
+                stroke="#00f",
+                opacity=0.2,
+            )
+            for p in curves
+        ]
+        + Plot.dot(zip(xs, ys))
+        + Plot.domain([-1, 1])
+    )
+
+
+plot_curves(prior_ps)
 
 
 # %%
@@ -93,12 +111,19 @@ tr["subtraces"]["p"]["subtraces"]["c"]["retval"]
 tr["subtraces"]["ys"]["retval"]
 # %%
 key, sub_key = jax.random.split(key)
-jax.jit(model(xs).importance)(sub_key, {"ys": {"y": {"value": -0.3}}})
+imp = jax.jit(model(xs).importance)
+observations: mg.Constraint = {"ys": {"y": {"value": ys}}}
+imp(sub_key, observations)
 # %%
-print(jax.make_jaxpr(lambda k: model(xs).simulate(k)["retval"])(sub_key))
+print(
+    jax.make_jaxpr(lambda k: model(xs).importance(k, observations)["retval"])(sub_key)
+)
 
 # %%
-ys
-# %%
-tr["subtraces"]["y"]["y"]["subtraces"]["value"]
+key, sub_key = jax.random.split(key)
+tr = jax.vmap(lambda k: imp(k, observations))(jax.random.split(sub_key, 50000))
+key, sub_key = jax.random.split(sub_key)
+winners = jax.vmap(mg.Categorical(logits=tr["w"]))(jax.random.split(sub_key, 100))
+posterior_ps = tr["subtraces"]["p"]["subtraces"]["c"]["retval"][winners]
+plot_curves(posterior_ps)
 # %%
