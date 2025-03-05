@@ -95,10 +95,9 @@ class GFI[R](GenPrimitive):
 
 
 class Distribution(GenPrimitive):
-    def __init__(self, name, tfd_ctor, scale: str | None = None):
+    def __init__(self, name, tfd_ctor):
         super().__init__(name)
         self.tfd_ctor = tfd_ctor
-        self.scale = scale
         mlir.register_lowering(self, mlir.lower_fun(self.impl, False))
 
     def abstract(self, *args, **kwargs):
@@ -135,26 +134,24 @@ class Distribution(GenPrimitive):
 
 
 BernoulliL = Distribution(
-    "Bernoulli",
+    "Bernoulli:L",
     lambda logits: tfp.distributions.Bernoulli(logits=logits),
-    scale="Logit",
 )
 BernoulliP = Distribution(
-    "Bernoulli", lambda probs: tfp.distributions.Bernoulli(probs=probs), scale="Prob"
+    "Bernoulli:P",
+    lambda probs: tfp.distributions.Bernoulli(probs=probs),
 )
 Normal = Distribution("Normal", tfp.distributions.Normal)
 MvNormalDiag = Distribution("MvNormalDiag", tfp.distributions.MultivariateNormalDiag)
 Uniform = Distribution("Uniform", tfp.distributions.Uniform)
 Flip = Distribution("Flip", lambda p: tfp.distributions.Bernoulli(probs=p))
 CategoricalL = Distribution(
-    "Categorical",
+    "Categorical:L",
     lambda logits: tfp.distributions.Categorical(logits=logits),
-    scale="Logit",
 )
 CategoricalP = Distribution(
-    "Categorical",
+    "Categorical:P",
     lambda probs: tfp.distributions.Categorical(probs=probs),
-    scale="Prob",
 )
 
 
@@ -465,7 +462,6 @@ class Simulate(Transformation[dict]):
         # score; instead, that will be interpreted as a regular simulate.
         if isinstance(eqn.primitive, Distribution):
             at = bind_params["at"]
-            # TODO: we have to check for the presence of the 'at' address in self.constraint
             addr = self.address + (at,)
             if (retval := self.apply_constraint(at)) is not None:
                 score = eqn.primitive.bind(retval, *params[1:], op="Score")
@@ -487,12 +483,6 @@ class Simulate(Transformation[dict]):
                 self.get_sub_key(), params, addr, self.get_sub_constraint(at)
             )
             self.trace[bind_params["at"]] = ans
-            # TODO: this `get` comes about because if we are a Distribution, but
-            # are not running in importance mode, there will be no 'w' sub-entry.
-            # There are better ways to do this: (1) move this logic up so that one
-            # case handles all of distribution, eliminating distribution's simulate_p
-            # or move the logics of these to the containing classes (probably a better
-            # idea).
             self.w += jnp.sum(ans.get("w", 0.0))
             return ans["retval"]
 
@@ -547,8 +537,8 @@ class Simulate(Transformation[dict]):
             if sub_address:
                 self.trace[sub_address] = ans[1]["subtraces"][sub_address]
 
-            # we extended the carry with the key; now drop it
             self.w += jnp.sum(ans[1].get("w", 0))
+            # we extended the carry with the key; now drop it
             return (ans[0][0], ans[1]["retval"][1])
 
         return super().handle_eqn(eqn, params, bind_params)
