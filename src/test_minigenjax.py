@@ -708,13 +708,35 @@ def test_importance():
 
 def test_repeat_importance():
     @Gen
-    def model(a):
-        return Normal(a, 0.1) @ "a"
+    def model(z):
+        a = Normal(z, 0.1) @ "a"
+        b = Normal(z, 1.0) @ "b"
+        return a + b
 
     mr = model(1.0).repeat(4)
     mr_imp = jax.jit(mr.importance)
-    tr = mr_imp(key0, {"b": 0.2})
-    print(tr)
+    values = jnp.arange(4) / 10.0
+    tr = mr_imp(key0, {"a": values})
+    assert jnp.allclose(tr["subtraces"]["a"]["retval"], values)
+    assert tr["w"] == -141.46541
+    assert tr["w"] == jnp.sum(tr["subtraces"]["a"]["w"])
+
+
+def test_vmap_importance():
+    @Gen
+    def model(z):
+        a = Normal(z, 0.1) @ "a"
+        b = Normal(z, 1.0) @ "b"
+        return a + b
+
+    values = jnp.arange(4.0)
+    mv = model.vmap()(values)
+    mv_imp = jax.jit(mv.importance)
+    observed_values = values + 0.1
+    values = jnp.array(observed_values)
+    tr = mv_imp(key0, {"a": values})
+    assert tr["w"] == 3.534588
+    assert jnp.allclose(tr["subtraces"]["a"]["retval"], observed_values)
 
 
 # %%

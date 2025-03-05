@@ -121,24 +121,6 @@ class Distribution(GenPrimitive):
             case _:
                 raise NotImplementedError(f'{self.name}.{kwargs["op"]}')
 
-    def simulate_p(
-        self,
-        key: PRNGKeyArray,
-        arg_tuple: tuple,
-        address: Address,
-        constraint: Constraint,
-    ):
-        # TODO: should we delegate the constraint lookup here, or have an assess_p method?
-        # TODO: are we sure we are propagating `scale` through the transformations?
-        keys = {}
-        if self.scale:
-            keys["scale"] = self.scale
-        v = self.bind(key, *arg_tuple[1:], **(keys | {"op": "Sample"}))
-        return {
-            "retval": v,
-            "score": self.bind(v, *arg_tuple[1:], **(keys | {"op": "Score"})),
-        }
-
     def __call__(self, *args):
         this = self
 
@@ -407,25 +389,47 @@ class Simulate(Transformation[dict]):
         self.trace = {}
         self.w = jnp.array(0.0)
 
-    def transform_inner(self, jaxpr, in_avals, addr: str):
+    def transform_inner(
+        self, jaxpr, in_avals, addr: str, constraint: Constraint | None = None
+    ):
         """Apply simulate to jaxpr and return the transformed jaxpr together
         with its return shape."""
 
-        return jax.make_jaxpr(
-            lambda key, in_avals: Simulate(
-                key, self.address + (addr,), self.get_sub_constraint(addr)
-            ).run(jaxpr, in_avals),
-            return_shape=True,
-        )(PHANTOM_KEY, in_avals)
+        if constraint:
+            reduced_constraint = jax.tree.map(lambda v: v[0], constraint)
+            return jax.make_jaxpr(
+                lambda key, co, in_avals: Simulate(key, self.address + (addr,), co).run(
+                    jaxpr, in_avals
+                ),
+                return_shape=True,
+            )(PHANTOM_KEY, reduced_constraint, in_avals)
+        else:
+            return jax.make_jaxpr(
+                lambda key, in_avals: Simulate(key, self.address + (addr,), {}).run(
+                    jaxpr, in_avals
+                ),
+                return_shape=True,
+            )(PHANTOM_KEY, in_avals)
 
     def handle_eqn(self, eqn: jx.core.JaxprEqn, params, bind_params):
         if isinstance(eqn.primitive, RepeatGF):
             at = bind_params["at"]
-            transformed, shape = self.transform_inner(bind_params["inner"], params, at)
-            new_params = bind_params | {"inner": transformed}
-            ans = eqn.primitive.Simulate(eqn.primitive, shape).bind(
-                self.get_sub_key(), *params, **new_params
+            sub_constraint = self.get_sub_constraint(at)
+            transformed, shape = self.transform_inner(
+                bind_params["inner"], params, at, sub_constraint
             )
+            new_params = bind_params | {"inner": transformed}
+            has_constraint = bool(sub_constraint)
+            if has_constraint:
+                flat_constraint, _ = jax.tree.flatten(sub_constraint)
+                ans = eqn.primitive.Simulate(eqn.primitive, shape, has_constraint).bind(
+                    self.get_sub_key(), *flat_constraint, *params, **new_params
+                )
+            else:
+                ans = eqn.primitive.Simulate(eqn.primitive, shape, has_constraint).bind(
+                    self.get_sub_key(), *params, **new_params
+                )
+
             u = jax.tree.unflatten(jax.tree.structure(shape), ans)
             self.trace[at] = u  # u["subtraces"]
             self.w += jnp.sum(u.get("w", 0))
@@ -433,13 +437,24 @@ class Simulate(Transformation[dict]):
 
         if isinstance(eqn.primitive, VmapGF):
             at = bind_params["at"]
+            sub_constraint = self.get_sub_constraint(at)
             transformed, shape = self.transform_inner(
-                bind_params["inner"], eqn.primitive.reduced_avals(params), at
+                bind_params["inner"],
+                eqn.primitive.reduced_avals(params),
+                at,
+                sub_constraint,
             )
             new_params = bind_params | {"inner": transformed}
-            ans = eqn.primitive.Simulate(eqn.primitive, shape).bind(
-                self.get_sub_key(), *params, **new_params
-            )
+            has_constraint = bool(sub_constraint)
+            if has_constraint:
+                flat_constraint, _ = jax.tree.flatten(sub_constraint)
+                ans = eqn.primitive.Simulate(eqn.primitive, shape, has_constraint).bind(
+                    self.get_sub_key(), *flat_constraint, *params, **new_params
+                )
+            else:
+                ans = eqn.primitive.Simulate(eqn.primitive, shape, has_constraint).bind(
+                    self.get_sub_key(), *params, **new_params
+                )
             u = jax.tree.unflatten(jax.tree.structure(shape), ans)
             self.trace[at] = u
             self.w += jnp.sum(u.get("w", 0))
@@ -448,8 +463,9 @@ class Simulate(Transformation[dict]):
         # we regard the presence of constraints as enabling importance mode,
         # so you can't do an importance over empty constraints to get a zero
         # score; instead, that will be interpreted as a regular simulate.
-        if isinstance(eqn.primitive, Distribution) and self.constraint:
+        if isinstance(eqn.primitive, Distribution):
             at = bind_params["at"]
+            # TODO: we have to check for the presence of the 'at' address in self.constraint
             addr = self.address + (at,)
             if (retval := self.apply_constraint(at)) is not None:
                 score = eqn.primitive.bind(retval, *params[1:], op="Score")
@@ -459,7 +475,8 @@ class Simulate(Transformation[dict]):
                 retval = eqn.primitive.bind(
                     self.get_sub_key(), *params[1:], op="Sample"
                 )
-                ans = {"retval": retval}
+                score = eqn.primitive.bind(retval, *params[1:], op="Score")
+                ans = {"retval": retval, "score": score}
             self.trace[bind_params["at"]] = ans
             return ans["retval"]
 
@@ -610,9 +627,12 @@ class RepeatGF[R](GFI[R]):
         address: Address,
         constraint: Constraint,
     ) -> dict:
-        return Simulate(key, address, constraint).run(self.jaxpr, arg_tuple)[
-            "subtraces"
-        ][RepeatGF.SUB_TRACE]
+        tr = Simulate(key, address, {RepeatGF.SUB_TRACE: constraint}).run(
+            self.jaxpr, arg_tuple
+        )["subtraces"][RepeatGF.SUB_TRACE]
+        if "w" in tr:
+            tr["w"] = jnp.sum(tr["w"])
+        return tr
 
     def __matmul__(self, address: str) -> R:
         return self.bind(
@@ -626,10 +646,11 @@ class RepeatGF[R](GFI[R]):
         return self.gfi.get_args()
 
     class Simulate[S](GFI[S]):
-        def __init__(self, r: "RepeatGF[S]", shape: Any):
+        def __init__(self, r: "RepeatGF[S]", shape: Any, has_constraint: bool):
             super().__init__("Repeat.Simulate")
             self.r = r
             self.shape = shape
+            self.has_constraint = has_constraint
             self.multiple_results = True
             mlir.register_lowering(
                 self, mlir.lower_fun(self.impl, self.multiple_results)
@@ -644,6 +665,14 @@ class RepeatGF[R](GFI[R]):
         def concrete(self, *args, **kwargs):
             # this is called after the simulate transformation so the key is the first argument
             j: jx.core.ClosedJaxpr = kwargs["inner"]
+            if self.has_constraint:
+                # TODO: there could be several constraint arguments; have a param count how many
+                return jax.vmap(
+                    lambda k, constraint, arg_tuple: jax.core.eval_jaxpr(
+                        j.jaxpr, j.consts, k, constraint, *arg_tuple
+                    ),
+                    in_axes=(0, 0, None),
+                )(jax.random.split(args[0], kwargs["n"]), args[1], args[2:])
             return jax.vmap(
                 lambda k: jax.core.eval_jaxpr(j.jaxpr, j.consts, k, *args[1:]),
                 in_axes=(0,),
@@ -718,9 +747,12 @@ class VmapGF[R](GFI[R]):
         address: Address,
         constraint: Constraint,
     ) -> dict:
-        return Simulate(key, address, constraint).run(self.jaxpr, arg_tuple)[
-            "subtraces"
-        ][VmapGF.SUB_TRACE]
+        tr = Simulate(key, address, {VmapGF.SUB_TRACE: constraint}).run(
+            self.jaxpr, arg_tuple
+        )["subtraces"][VmapGF.SUB_TRACE]
+        if "w" in tr:
+            tr["w"] = jnp.sum(tr["w"])
+        return tr
 
     def __matmul__(self, address: str) -> R:
         return self.bind(
@@ -734,11 +766,14 @@ class VmapGF[R](GFI[R]):
         return self.jaxpr
 
     class Simulate[S](GFI[S]):
-        def __init__(self, r: "VmapGF[S]", shape: Any):  # TODO: PyTreeDef?
+        def __init__(
+            self, r: "VmapGF[S]", shape: Any, has_constraint: bool
+        ):  # TODO: PyTreeDef?
             super().__init__("Vmap.Simulate")
             self.r = r
             self.n = self.r.arg_tuple[self.r.p_index].shape[self.r.an_axis]
             self.shape = shape
+            self.has_constraint = has_constraint
             self.multiple_results = True
             mlir.register_lowering(
                 self, mlir.lower_fun(self.impl, self.multiple_results)
@@ -753,6 +788,15 @@ class VmapGF[R](GFI[R]):
         def concrete(self, *args, **kwargs):
             # this is called after the simulate transformation so the key is the first argument
             j: jx.core.ClosedJaxpr = kwargs["inner"]
+            if self.has_constraint:
+                # TODO: there could be several constraint arguments; have a param count how many
+                return jax.vmap(
+                    lambda k, constraint, arg_tuple: jax.core.eval_jaxpr(
+                        j.jaxpr, j.consts, k, constraint, *arg_tuple
+                    ),
+                    in_axes=(0, 0, self.r.in_axes),
+                )(jax.random.split(args[0], self.n), args[1], args[2:])
+
             return jax.vmap(
                 lambda k, arg_tuple: jax.core.eval_jaxpr(
                     j.jaxpr, j.consts, k, *arg_tuple
