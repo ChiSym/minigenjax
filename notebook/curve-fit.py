@@ -72,12 +72,15 @@ def goal(x):
 
 
 ys = jax.vmap(goal)(xs)
-
+# %%
+prior(key)
 # %%
 key, sub_key = jax.random.split(key)
 prior_ps = jax.vmap(prior)(jax.random.split(sub_key, 100))["subtraces"]["p"]["retval"]
 
-
+# %%
+prior_ps
+# %%
 # NOTE: the Poly constructor below is a bug. The retval should have come in Poly form not a bare array.
 def plot_curves(curves):
     return (
