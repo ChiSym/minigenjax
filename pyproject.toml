@@ -33,4 +33,4 @@ include = ["src"]
 
 [tool.ruff.lint.per-file-ignores]
 # OK to `from _ import *` in  unit tests
-"src/test_*.py" = ["F403", "F405"]
+"src/**/test_*.py" = ["F403", "F405"]
