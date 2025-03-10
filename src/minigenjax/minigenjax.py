@@ -1,7 +1,6 @@
 # %%
 from typing import Any, Callable, Sequence
 from jax._src.core import ClosedJaxpr as ClosedJaxpr
-import tensorflow_probability.substrates.jax as tfp
 import jax
 import jax.tree
 import jax.api_util
@@ -84,7 +83,9 @@ class GFI[R](GenPrimitive):
         tr = self.simulate(key)
         return to_constraint(tr), to_score(tr), tr["retval"]
 
-    def importance(self, key: PRNGKeyArray, constraint: Constraint) -> tuple[dict, Float]:
+    def importance(
+        self, key: PRNGKeyArray, constraint: Constraint
+    ) -> tuple[dict, Float]:
         tr = self.simulate_p(key, self.get_args(), (), constraint)
         return tr, to_weight(tr)
 
@@ -119,100 +120,6 @@ class GFI[R](GenPrimitive):
         )
         structure = out_tree()
         return jaxpr, flat_args, structure
-
-
-class Distribution(GenPrimitive):
-    def __init__(self, name, tfd_ctor):
-        super().__init__(name)
-        self.tfd_ctor = tfd_ctor
-        mlir.register_lowering(self, mlir.lower_fun(self.impl, False))
-
-    def abstract(self, *args, **kwargs):
-        return args[1]
-
-    def concrete(self, *args, **kwargs):
-        match kwargs.get("op", "Sample"):
-            case "Sample":
-                # we convert to float here because Bernoulli/Flip will
-                # normally return an int, and that confuses XLA, since
-                # our abstract implementation says the return types are
-                # floats. TODO: consider allowing the marking of integer-
-                # returning distributions as ints are sometimes nice to
-                # work with.
-                return jnp.asarray(
-                    self.tfd_ctor(*args[1:]).sample(seed=args[0]), dtype=float
-                )
-            case "Score":
-                return self.tfd_ctor(*args[1:]).log_prob(args[0])
-            case _:
-                raise NotImplementedError(f"{self.name}.{kwargs['op']}")
-
-    def simulate_p(
-        self,
-        key: PRNGKeyArray,
-        arg_tuple: tuple,
-        address: Address,
-        constraint: Constraint | None,
-    ):  
-        if constraint is not None: # TODO: fishy
-            score = self.bind(constraint, *arg_tuple[1:], op="Score")
-            ans = {"w": score, "retval": constraint}
-        else:
-            retval = self.bind(
-                key, *arg_tuple[1:], op="Sample"
-            )
-            score = self.bind(retval, *arg_tuple[1:], op="Score")
-            ans = {"retval": retval, "score": score}
-        return ans
-
-
-    def __call__(self, *args):
-        this = self
-
-        class Binder:
-            def __matmul__(self, address: str):
-                return this.bind(PHANTOM_KEY, *args, at=address)
-
-            def __call__(self, key: PRNGKeyArray):
-                return this.tfd_ctor(*args).sample(seed=key)
-
-        return Binder()
-
-
-BernoulliL = Distribution(
-    "Bernoulli:L",
-    lambda logits: tfp.distributions.Bernoulli(logits=logits),
-)
-BernoulliP = Distribution(
-    "Bernoulli:P",
-    lambda probs: tfp.distributions.Bernoulli(probs=probs),
-)
-Normal = Distribution("Normal", tfp.distributions.Normal)
-MvNormalDiag = Distribution("MvNormalDiag", tfp.distributions.MultivariateNormalDiag)
-Uniform = Distribution("Uniform", tfp.distributions.Uniform)
-Flip = Distribution("Flip", lambda p: tfp.distributions.Bernoulli(probs=p))
-CategoricalL = Distribution(
-    "Categorical:L",
-    lambda logits: tfp.distributions.Categorical(logits=logits),
-)
-CategoricalP = Distribution(
-    "Categorical:P",
-    lambda probs: tfp.distributions.Categorical(probs=probs),
-)
-
-
-def choose_scale(logits, probs, logit_dist, prob_dist):
-    if (logits is None) == (probs is None):
-        raise ValueError("Supply exactly one of logits=, probs=")
-    return logit_dist(logits) if logits is not None else prob_dist(probs)
-
-
-def Bernoulli(*, logits=None, probs=None):
-    return choose_scale(logits, probs, BernoulliL, BernoulliP)
-
-
-def Categorical(*, logits=None, probs=None):
-    return choose_scale(logits, probs, CategoricalL, CategoricalP)
 
 
 class KeySplitP(jx.core.Primitive):
@@ -413,18 +320,12 @@ class Assess(Transformation[Array]):
         self.score = jnp.array(0.0)
 
     def handle_eqn(self, eqn: jx.core.JaxprEqn, params, bind_params):
-        if isinstance(eqn.primitive, Distribution):
-            addr = self.address + (bind_params["at"],)
-            v = self.apply_constraint(bind_params["at"])
-            self.score += eqn.primitive.bind(v, *params[1:], op="Score")
-            return v
-
         if isinstance(eqn.primitive, GenPrimitive):
-            a = bind_params["at"]
-            addr = self.address + (a,)
-            sub_constraint = self.constraint.get(a, {})
-            assert isinstance(sub_constraint, dict)
-            ans, score = eqn.primitive.assess_p(params, sub_constraint, addr)
+            at = bind_params["at"]
+            addr = self.address + (at,)
+            ans, score = eqn.primitive.assess_p(
+                params, self.get_sub_constraint(at), addr
+            )
             self.score += score
             return ans
 
@@ -915,8 +816,10 @@ def trace_sum(trace: dict, key: str) -> Float:
         return sum(jnp.sum(trace_sum(v, key)) for v in trace["subtraces"].values())
     return jnp.sum(trace.get(key, 0.0))
 
+
 def to_score(trace: dict) -> Float:
     return trace_sum(trace, "score")
+
 
 def to_weight(trace: dict) -> Float:
     return trace_sum(trace, "w")

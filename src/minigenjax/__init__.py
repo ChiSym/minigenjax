@@ -1,17 +1,21 @@
 from .minigenjax import (
     Gen,
-    Normal,
-    Uniform,
     Cond,
-    Flip,
     to_constraint,
     to_score,
     Constraint,
+    Scan,
+)
+
+from .distribution import (
+    Flip,
+    Normal,
+    Uniform,
     Categorical,
     Bernoulli,
     MvNormalDiag,
-    Scan,
 )
+
 from .pytree import pytree as pytree
 
 __all__ = [
