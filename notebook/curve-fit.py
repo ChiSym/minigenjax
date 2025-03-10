@@ -129,3 +129,5 @@ winners = jax.vmap(mg.Categorical(logits=tr["w"]))(jax.random.split(sub_key, 100
 posterior_ps = tr["subtraces"]["p"]["retval"][winners]
 plot_curves(posterior_ps)
 # %%
+mg.to_score(tr)
+# %%
