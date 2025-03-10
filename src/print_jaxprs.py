@@ -1,7 +1,7 @@
 import jax
 import jax.numpy as jnp
 import minigenjax
-from test_minigenjax import model1, model2, model3, cond_model
+from minigenjax.test_minigenjax import model1, model2, model3, cond_model
 
 
 @minigenjax.Gen

@@ -153,9 +153,7 @@ def test_logit_vs_probs():
 
 
 def test_model_vmap():
-    tr = jax.vmap(model3(50.0).map(lambda t: t[0] + t[1]).simulate)(
-        jax.random.split(key0, 5)
-    )
+    tr = jax.vmap(model3(50.0).map(sum).simulate)(jax.random.split(key0, 5))
     assert jnp.allclose(
         tr["retval"], jnp.array([76.4031, 76.777, 75.255844, 76.623726, 76.145515])
     )
@@ -414,7 +412,7 @@ class TestCurve:
                 @ "y"
             )
 
-        print(jax.make_jaxpr(model(points).simulate)(key0))
+        # print(jax.make_jaxpr(model(points).simulate)(key0))
         jit_model = jax.jit(model(points).simulate)
 
         tr = jit_model(key0)

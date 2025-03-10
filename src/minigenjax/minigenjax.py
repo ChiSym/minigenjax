@@ -1,10 +1,13 @@
 # %%
 from typing import Any, Callable, Sequence
+from jax._src.core import ClosedJaxpr as ClosedJaxpr
 import tensorflow_probability.substrates.jax as tfp
 import jax
 import jax.tree
+import jax.api_util
 import jax.numpy as jnp
 from jax.interpreters import batching, mlir
+
 import jax.extend as jx
 import jax.core
 from jaxtyping import Array, ArrayLike, PRNGKeyArray
@@ -14,6 +17,13 @@ from jaxtyping import Array, ArrayLike, PRNGKeyArray
 Address = tuple[str, ...]
 Constraint = dict[str, "ArrayLike|Constraint"]
 PHANTOM_KEY = jax.random.key(987654321)
+
+WrappedFunWithAux = tuple[jx.linear_util.WrappedFun, Callable[[], Any]]
+
+# Wrapper to assign a correct type.
+flatten_fun_nokwargs: Callable[[jx.linear_util.WrappedFun, Any], WrappedFunWithAux] = (
+    jax.api_util.flatten_fun_nokwargs  # pyright: ignore[reportAssignmentType]
+)
 
 
 class GenPrimitive(jx.core.Primitive):
@@ -93,6 +103,20 @@ class GFI[R](GenPrimitive):
     def get_jaxpr(self) -> jx.core.ClosedJaxpr:
         raise NotImplementedError(f"get_jaxpr: {self}")
 
+    def get_structure(self) -> jax.tree_util.PyTreeDef:
+        raise NotImplementedError(f"get_structure: {self}")
+
+    @staticmethod
+    def make_jaxpr(f, arg_tuple):
+        flat_args, in_tree = jax.tree.flatten(arg_tuple)
+        flat_f, out_tree = flatten_fun_nokwargs(jx.linear_util.wrap_init(f), in_tree)
+        # TODO: consider whether we need shape here
+        jaxpr, shape = jax.make_jaxpr(flat_f.call_wrapped, return_shape=True)(
+            *flat_args
+        )
+        structure = out_tree()
+        return jaxpr, flat_args, structure
+
 
 class Distribution(GenPrimitive):
     def __init__(self, name, tfd_ctor):
@@ -118,7 +142,7 @@ class Distribution(GenPrimitive):
             case "Score":
                 return self.tfd_ctor(*args[1:]).log_prob(args[0])
             case _:
-                raise NotImplementedError(f'{self.name}.{kwargs["op"]}')
+                raise NotImplementedError(f"{self.name}.{kwargs['op']}")
 
     def __call__(self, *args):
         this = self
@@ -215,15 +239,15 @@ class GF[R](GFI[R]):
     def __init__(self, f: Callable[..., R], args: tuple):
         super().__init__(f"GF[{f.__name__}]")
         self.f = f
+
         self.args = args
-        self.flat_args, self.in_tree = jax.tree.flatten(self.args)
-        self.jaxpr, self.shape = jax.make_jaxpr(f, return_shape=True)(*args)
-        self.structure = jax.tree.structure(self.shape)
-        self.multiple_results = isinstance(self.shape, tuple)
+        self.jaxpr, self.flat_args, self.structure = self.make_jaxpr(self.f, self.args)
+        self.multiple_results = self.structure.num_leaves > 1
+
         a_vals = [ov.aval for ov in self.jaxpr.jaxpr.outvars]
         self.abstract_value = a_vals if self.multiple_results else a_vals[0]
 
-    def abstract(self, *args, at: str, **_kwargs):
+    def abstract(self, *args, **_kwargs):
         return self.abstract_value
 
     def simulate_p(
@@ -233,10 +257,9 @@ class GF[R](GFI[R]):
         address: Address,
         constraint: Constraint,
     ) -> dict:
-        v = Simulate(key, address, constraint).run(self.jaxpr, arg_tuple)
-        if self.multiple_results:
-            v["retval"] = jax.tree.unflatten(self.structure, v["retval"])
-        return v
+        return Simulate(key, address, constraint).run(
+            self.jaxpr, arg_tuple, self.structure
+        )
 
     def assess_p(
         self, arg_tuple: tuple, constraint: Constraint, address
@@ -253,6 +276,9 @@ class GF[R](GFI[R]):
 
     def get_jaxpr(self) -> jx.core.ClosedJaxpr:
         return self.jaxpr
+
+    def get_structure(self) -> jax.tree_util.PyTreeDef:
+        return self.structure
 
 
 class Transformation[R]:
@@ -274,7 +300,12 @@ class Transformation[R]:
         self.key_consumer_count -= 1
         return sub_key
 
-    def run(self, closed_jaxpr: jx.core.ClosedJaxpr, arg_tuple):
+    def run(
+        self,
+        closed_jaxpr: jx.core.ClosedJaxpr,
+        arg_tuple,
+        structure: jax.tree_util.PyTreeDef | None = None,
+    ):
         jaxpr = closed_jaxpr.jaxpr
         flat_args, in_tree = jax.tree.flatten(arg_tuple)
         env: dict[jx.core.Var, Any] = {}
@@ -318,7 +349,10 @@ class Transformation[R]:
                 write(eqn.outvars[0], ans)
             # clean_up_dead_vars(eqn, env, lu)
         retval = jax.util.safe_map(read, jaxpr.outvars)
-        retval = retval if len(jaxpr.outvars) > 1 else retval[0]
+        if structure is not None:
+            retval = jax.tree.unflatten(structure, retval)
+        else:
+            retval = retval if len(jaxpr.outvars) > 1 else retval[0]
         return self.construct_retval(retval)
 
     def address_from_branch(self, b: jx.core.ClosedJaxpr):
@@ -408,6 +442,21 @@ class Simulate(Transformation[dict]):
                 return_shape=True,
             )(PHANTOM_KEY, in_avals)
 
+    def record(self, subtrace, at):
+        if (
+            (inner_trace := subtrace.get("subtraces"))
+            and len(keys := inner_trace.keys()) == 1
+            and (key := next(iter(keys))).startswith("__")
+        ):
+            # absorb interstitial trace points like __repeat, __vmap that may
+            # occur when combinators are stacked. Preseve the outermost retval,
+            # though, as it will have the correct structure (?) TODO: is this true?
+            subtrace["subtraces"] = inner_trace[key]["subtraces"]
+        if at:
+            self.trace[at] = subtrace
+        self.w += jnp.sum(subtrace.get("w", 0.0))
+        return subtrace["retval"]
+
     def handle_eqn(self, eqn: jx.core.JaxprEqn, params, bind_params):
         if isinstance(eqn.primitive, RepeatGF):
             at = bind_params["at"]
@@ -428,9 +477,7 @@ class Simulate(Transformation[dict]):
                 )
 
             u = jax.tree.unflatten(jax.tree.structure(shape), ans)
-            self.trace[at] = u  # u["subtraces"]
-            self.w += jnp.sum(u.get("w", 0))
-            return u["retval"]
+            return self.record(u, at)
 
         if isinstance(eqn.primitive, VmapGF):
             at = bind_params["at"]
@@ -443,19 +490,20 @@ class Simulate(Transformation[dict]):
             )
             new_params = bind_params | {"inner": transformed}
             has_constraint = bool(sub_constraint)
+            flat_params, _ = jax.tree.flatten(params)
             if has_constraint:
                 flat_constraint, _ = jax.tree.flatten(sub_constraint)
                 ans = eqn.primitive.Simulate(eqn.primitive, shape, has_constraint).bind(
-                    self.get_sub_key(), *flat_constraint, *params, **new_params
+                    self.get_sub_key(), *flat_constraint, *flat_params, **new_params
                 )
             else:
                 ans = eqn.primitive.Simulate(eqn.primitive, shape, has_constraint).bind(
-                    self.get_sub_key(), *params, **new_params
+                    self.get_sub_key(), *flat_params, **new_params
                 )
             u = jax.tree.unflatten(jax.tree.structure(shape), ans)
-            self.trace[at] = u
-            self.w += jnp.sum(u.get("w", 0))
-            return u["retval"]
+            if z := u["subtraces"].get(RepeatGF.SUB_TRACE):
+                u = z
+            return self.record(u, at)
 
         # we regard the presence of constraints as enabling importance mode,
         # so you can't do an importance over empty constraints to get a zero
@@ -465,7 +513,6 @@ class Simulate(Transformation[dict]):
             addr = self.address + (at,)
             if (retval := self.apply_constraint(at)) is not None:
                 score = eqn.primitive.bind(retval, *params[1:], op="Score")
-                self.w += jnp.sum(score)
                 ans = {"w": score, "retval": retval}
             else:
                 retval = eqn.primitive.bind(
@@ -473,8 +520,7 @@ class Simulate(Transformation[dict]):
                 )
                 score = eqn.primitive.bind(retval, *params[1:], op="Score")
                 ans = {"retval": retval, "score": score}
-            self.trace[bind_params["at"]] = ans
-            return ans["retval"]
+            return self.record(ans, at)
 
         if isinstance(eqn.primitive, GenPrimitive):
             at = bind_params["at"]
@@ -482,9 +528,7 @@ class Simulate(Transformation[dict]):
             ans = eqn.primitive.simulate_p(
                 self.get_sub_key(), params, addr, self.get_sub_constraint(at)
             )
-            self.trace[bind_params["at"]] = ans
-            self.w += jnp.sum(ans.get("w", 0.0))
-            return ans["retval"]
+            return self.record(ans, at)
 
         if eqn.primitive is jax.lax.cond_p:
             branches = bind_params["branches"]
@@ -509,9 +553,9 @@ class Simulate(Transformation[dict]):
                     branches[0], params[1:]
                 ),
             )
-
             if sub_address:
                 self.trace[sub_address] = ans["subtraces"][sub_address]
+
             self.w += jnp.sum(ans.get("w", 0))
             # The reasons why this result has to be a sequence is obscure to me,
             # but cond_p as a primitive requires "multiple results."
@@ -600,12 +644,12 @@ class RepeatGF[R](GFI[R]):
         self.n = n
         self.multiple_results = self.gfi.multiple_results
         # TODO: try to reuse self.__matmul__ here, if possible
-        self.jaxpr, self.shape = jax.make_jaxpr(
+        self.jaxpr, self.flat_args, self.structure = self.make_jaxpr(
             lambda *args: self.bind(
-                *args, n=self.n, at=RepeatGF.SUB_TRACE, inner=self.gfi.get_jaxpr()
+                *args, at=RepeatGF.SUB_TRACE, n=self.n, inner=self.gfi.get_jaxpr()
             ),
-            return_shape=True,
-        )(*self.get_args())
+            self.get_args(),
+        )
 
     def abstract(self, *args, **kwargs):
         return self.inflate(self.gfi.abstract(*args, **kwargs), self.n)
@@ -618,7 +662,7 @@ class RepeatGF[R](GFI[R]):
         constraint: Constraint,
     ) -> dict:
         tr = Simulate(key, address, {RepeatGF.SUB_TRACE: constraint}).run(
-            self.jaxpr, arg_tuple
+            self.jaxpr, arg_tuple, self.structure
         )["subtraces"][RepeatGF.SUB_TRACE]
         if "w" in tr:
             tr["w"] = jnp.sum(tr["w"])
@@ -631,6 +675,9 @@ class RepeatGF[R](GFI[R]):
 
     def get_jaxpr(self) -> jx.core.ClosedJaxpr:
         return self.jaxpr
+
+    def get_structure(self):
+        return self.structure
 
     def get_args(self) -> tuple:
         return self.gfi.get_args()
@@ -801,6 +848,17 @@ class MapGF[R, S](GFI[S]):
         self.gfi = gfi
         self.f = f
 
+        inner = self.gfi.get_jaxpr()
+        self.jaxpr, self.flat_args, self.structure = self.make_jaxpr(
+            lambda *args: self.f(
+                jax.tree.unflatten(
+                    self.gfi.get_structure(),
+                    jax.core.eval_jaxpr(inner.jaxpr, inner.consts, *args),
+                )
+            ),
+            self.gfi.get_args(),
+        )
+
     def abstract(self, *args, **kwargs):
         # this can't be right: what about the effect of f? Why isn't it
         # sufficient to apply f to a tracer to compose the abstraction?
@@ -813,21 +871,25 @@ class MapGF[R, S](GFI[S]):
         address: Address,
         constraint: Constraint,
     ) -> dict:
-        v = self.gfi.simulate_p(key, arg_tuple, address, constraint)
-        v["retval"] = self.f(v["retval"])
-        return v
+        print(f"map simulating with structure {self.structure}")
+        return Simulate(key, address, constraint).run(
+            self.jaxpr, arg_tuple, self.structure
+        )
+        # v = self.gfi.simulate_p(key, arg_tuple, address, constraint)
+        # v["retval"] = self.f(v["retval"])
+        # return v
 
     def __matmul__(self, address: str) -> S:
-        return self.f(self.gfi @ address)
+        # TODO (Q): can we declare multiple returns and drop the brackets?
+        return jax.tree.unflatten(
+            self.structure, [self.bind(*self.flat_args, at=address)]
+        )
 
     def get_args(self) -> tuple:
         return self.gfi.get_args()
 
     def get_jaxpr(self) -> jx.core.ClosedJaxpr:
-        ij = self.gfi.get_jaxpr()
-        return jax.make_jaxpr(
-            lambda args: self.f(*jax.core.eval_jaxpr(ij.jaxpr, ij.consts, *args))
-        )(self.gfi.get_args())
+        return self.jaxpr
 
 
 def to_constraint(trace: dict) -> Constraint:

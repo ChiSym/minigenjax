@@ -3,7 +3,6 @@
 import jax
 import genstudio.plot as Plot
 import jax.numpy as jnp
-import dataclasses
 import minigenjax as mg
 
 
@@ -32,8 +31,7 @@ def coefficient():
     return mg.Normal(0.0, 1.0) @ "c"
 
 
-@jax.tree_util.register_dataclass
-@dataclasses.dataclass
+@mg.pytree
 class Poly:
     coefficients: jax.Array
 
@@ -72,19 +70,23 @@ def goal(x):
 
 
 ys = jax.vmap(goal)(xs)
-
+# %%
+prior(key)
 # %%
 key, sub_key = jax.random.split(key)
 prior_ps = jax.vmap(prior)(jax.random.split(sub_key, 100))["subtraces"]["p"]["retval"]
 
+# %%
+prior_ps
 
-# NOTE: the Poly constructor below is a bug. The retval should have come in Poly form not a bare array.
+
+# %%
 def plot_curves(curves):
     return (
         Plot.line([(x, goal(x)) for x in jnp.arange(-1.0, 1.0, 0.1)])
         + [
             Plot.line(
-                [(x, Poly(p)(x)) for x in jnp.arange(-1.0, 1.0, 0.1)],
+                [(x, p(x)) for x in jnp.arange(-1.0, 1.0, 0.1)],
                 stroke="#00f",
                 opacity=0.2,
             )
@@ -124,6 +126,6 @@ key, sub_key = jax.random.split(key)
 tr = jax.vmap(lambda k: imp(k, observations))(jax.random.split(sub_key, 50000))
 key, sub_key = jax.random.split(sub_key)
 winners = jax.vmap(mg.Categorical(logits=tr["w"]))(jax.random.split(sub_key, 100))
-posterior_ps = tr["subtraces"]["p"]["subtraces"]["c"]["retval"][winners]
+posterior_ps = tr["subtraces"]["p"]["retval"][winners]
 plot_curves(posterior_ps)
 # %%
