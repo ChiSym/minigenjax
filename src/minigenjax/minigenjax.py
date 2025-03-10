@@ -84,8 +84,9 @@ class GFI[R](GenPrimitive):
         tr = self.simulate(key)
         return to_constraint(tr), to_score(tr), tr["retval"]
 
-    def importance(self, key: PRNGKeyArray, constraint: Constraint) -> dict:
-        return self.simulate_p(key, self.get_args(), (), constraint)
+    def importance(self, key: PRNGKeyArray, constraint: Constraint) -> tuple[dict, Float]:
+        tr = self.simulate_p(key, self.get_args(), (), constraint)
+        return tr, to_weight(tr)
 
     def assess(self, constraint) -> Array:
         return self.assess_p(self.get_args(), constraint, ())[1]
@@ -452,8 +453,7 @@ class Simulate(Transformation[dict]):
             and (key := next(iter(keys))).startswith("__")
         ):
             # absorb interstitial trace points like __repeat, __vmap that may
-            # occur when combinators are stacked. Preseve the outermost retval,
-            # though, as it will have the correct structure (?) TODO: is this true?
+            # occur when combinators are stacked.
             subtrace["subtraces"] = inner_trace[key]["subtraces"]
         if at:
             self.trace[at] = subtrace
@@ -666,8 +666,8 @@ class RepeatGF[R](GFI[R]):
         tr = Simulate(key, address, {RepeatGF.SUB_TRACE: constraint}).run(
             self.jaxpr, arg_tuple, self.structure
         )["subtraces"][RepeatGF.SUB_TRACE]
-        if "w" in tr:
-            tr["w"] = jnp.sum(tr["w"])
+        # if "w" in tr:
+        #     tr["w"] = jnp.sum(tr["w"])
         return tr
 
     def __matmul__(self, address: str) -> R:
@@ -791,8 +791,8 @@ class VmapGF[R](GFI[R]):
         tr = Simulate(key, address, {VmapGF.SUB_TRACE: constraint}).run(
             self.jaxpr, arg_tuple
         )["subtraces"][VmapGF.SUB_TRACE]
-        if "w" in tr:
-            tr["w"] = jnp.sum(tr["w"])
+        # if "w" in tr:
+        #     tr["w"] = jnp.sum(tr["w"])
         return tr
 
     def __matmul__(self, address: str) -> R:
@@ -909,7 +909,13 @@ def to_constraint(trace: dict) -> Constraint:
     return trace["retval"]
 
 
-def to_score(trace: dict) -> Float:
+def trace_sum(trace: dict, key: str) -> Float:
     if "subtraces" in trace:
-        return sum(jnp.sum(to_score(v)) for v in trace["subtraces"].values())
-    return trace.get("score", 0.0)
+        return sum(jnp.sum(trace_sum(v, key)) for v in trace["subtraces"].values())
+    return jnp.sum(trace.get(key, 0.0))
+
+def to_score(trace: dict) -> Float:
+    return trace_sum(trace, "score")
+
+def to_weight(trace: dict) -> Float:
+    return trace_sum(trace, "w")

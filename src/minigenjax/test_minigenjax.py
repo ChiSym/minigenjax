@@ -698,16 +698,15 @@ def test_importance():
     model_imp = jax.jit(model().importance)
     outer_imp = jax.jit(outer().importance)
 
-    tr1 = model_imp(key0, {"a": 1.0})
-    assert tr1["w"] == -1.4189385
-    tr2 = model_imp(key0, {"b": 1.0})
-    assert tr2["w"] == -48.616352
-    tr3 = model_imp(key0, {"a": 1.0, "b": 1.0})
-    assert tr3["w"] == tr1["w"] + tr2["w"]
+    tr1, w1 = model_imp(key0, {"a": 1.0})
+    assert w1 == -1.4189385
+    tr2, w2 = model_imp(key0, {"b": 1.0})
+    assert w2 == -48.616352
+    tr3, w3 = model_imp(key0, {"a": 1.0, "b": 1.0})
+    assert w3 == w1 + w2
 
-    tr4 = outer_imp(key0, {"c": 0.5, "d": {"b": 0.3}})
-
-    assert tr4["w"] == -4.160292
+    tr4, w4 = outer_imp(key0, {"c": 0.5, "d": {"b": 0.3}})
+    assert w4 == -4.160292
 
 
 def test_repeat_importance():
@@ -720,10 +719,10 @@ def test_repeat_importance():
     mr = model(1.0).repeat(4)
     mr_imp = jax.jit(mr.importance)
     values = jnp.arange(4) / 10.0
-    tr = mr_imp(key0, {"a": values})
+    tr, w = mr_imp(key0, {"a": values})
     assert jnp.allclose(tr["subtraces"]["a"]["retval"], values)
-    assert tr["w"] == -141.46541
-    assert tr["w"] == jnp.sum(tr["subtraces"]["a"]["w"])
+    assert w == -141.46541
+    assert w == jnp.sum(tr["subtraces"]["a"]["w"])
 
 
 def test_vmap_importance():
@@ -738,8 +737,8 @@ def test_vmap_importance():
     mv_imp = jax.jit(mv.importance)
     observed_values = values + 0.1
     values = jnp.array(observed_values)
-    tr = mv_imp(key0, {"a": values})
-    assert tr["w"] == 3.534588
+    tr, w = mv_imp(key0, {"a": values})
+    assert w == 3.534588
     assert jnp.allclose(tr["subtraces"]["a"]["retval"], observed_values)
 
 
