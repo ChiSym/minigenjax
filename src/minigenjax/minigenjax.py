@@ -10,7 +10,7 @@ from jax.interpreters import batching, mlir
 
 import jax.extend as jx
 import jax.core
-from jaxtyping import Array, ArrayLike, PRNGKeyArray
+from jaxtyping import Array, ArrayLike, PRNGKeyArray, Float
 
 
 # %%
@@ -67,9 +67,7 @@ class GenPrimitive(jx.core.Primitive):
         def inflate_one(v):
             return v.update(shape=(n,) + v.shape)
 
-        if isinstance(v, tuple):
-            return tuple(map(inflate_one, v))
-        return inflate_one(v)
+        return jax.tree.map(inflate_one, v)
 
 
 InAxesT = int | Sequence[Any] | None
@@ -81,6 +79,10 @@ class GFI[R](GenPrimitive):
 
     def simulate(self, key: PRNGKeyArray) -> dict:
         return self.simulate_p(key, self.get_args(), (), {})
+
+    def propose(self, key: PRNGKeyArray) -> tuple[Constraint, Float, R]:
+        tr = self.simulate(key)
+        return to_constraint(tr), to_score(tr), tr["retval"]
 
     def importance(self, key: PRNGKeyArray, constraint: Constraint) -> dict:
         return self.simulate_p(key, self.get_args(), (), constraint)
@@ -343,8 +345,9 @@ class Transformation[R]:
             #    traceback, name_stack=name_stack), eqn.ctx.manager:
             params = tuple(jax.util.safe_map(read, eqn.invars))
             ans = self.handle_eqn(eqn, params, bind_params)
+            # the return value is currently not flat. (is that the right choice?)
             if eqn.primitive.multiple_results:
-                jax.util.safe_map(write, eqn.outvars, ans)
+                jax.util.safe_map(write, eqn.outvars, jax.tree.flatten(ans)[0])
             else:
                 write(eqn.outvars[0], ans)
             # clean_up_dead_vars(eqn, env, lu)
@@ -484,12 +487,13 @@ class Simulate(Transformation[dict]):
             sub_constraint = self.get_sub_constraint(at)
             transformed, shape = self.transform_inner(
                 bind_params["inner"],
-                eqn.primitive.reduced_avals(params),
+                eqn.primitive.reduced_avals,
                 at,
                 sub_constraint,
             )
             new_params = bind_params | {"inner": transformed}
             has_constraint = bool(sub_constraint)
+            # TODO: the below is sus. Aren't the params already flat here?
             flat_params, _ = jax.tree.flatten(params)
             if has_constraint:
                 flat_constraint, _ = jax.tree.flatten(sub_constraint)
@@ -501,8 +505,6 @@ class Simulate(Transformation[dict]):
                     self.get_sub_key(), *flat_params, **new_params
                 )
             u = jax.tree.unflatten(jax.tree.structure(shape), ans)
-            if z := u["subtraces"].get(RepeatGF.SUB_TRACE):
-                u = z
             return self.record(u, at)
 
         # we regard the presence of constraints as enabling importance mode,
@@ -739,14 +741,16 @@ class VmapGF[R](GFI[R]):
             self.p_index, self.an_axis = 0, self.in_axes
         # Compute the "scalar" jaxpr by feeding the un-v-mapped arguments to make_jaxpr
         # TODO: does `self` need to remember these?
+        self.reduced_avals = self.get_reduced_avals(self.arg_tuple)
         self.inner_jaxpr, self.inner_shape = jax.make_jaxpr(g.f, return_shape=True)(
-            *jax.tree.unflatten(self.in_tree, self.reduced_avals(self.arg_tuple))
+            *self.reduced_avals
         )
         n = self.arg_tuple[self.p_index].shape[self.an_axis]
         # the shape of the v-mapped function will increase every axis of the result
-        self.shape = jax.ShapeDtypeStruct(
-            (n,) + self.inner_shape.shape, self.inner_shape.dtype
+        self.shape = jax.tree.map(
+            lambda s: jax.ShapeDtypeStruct((n,) + s.shape, s.dtype), self.inner_shape
         )
+        self.multiple_results = isinstance(self.shape, tuple)
         self.jaxpr, self.shape = jax.make_jaxpr(
             lambda *args: self.bind(
                 *args, in_axes=self.in_axes, at=VmapGF.SUB_TRACE, inner=self.inner_jaxpr
@@ -754,25 +758,25 @@ class VmapGF[R](GFI[R]):
             return_shape=True,
         )(*self.flat_args)
 
-    def reduced_avals(self, arg_tuple):
-        # if in_axes is not an tuple, lift it to the same shape as arg tuple
-        if isinstance(self.in_axes, int):
-            ia = jax.tree.map(lambda _: self.in_axes, arg_tuple)
-        else:
-            ia = self.in_axes
-
-        # Now produce an abstract arg tuple in which the shape of the
+    def get_reduced_avals(self, arg_tuple):
+        # Produce an abstract arg tuple in which the shape of the
         # arrays is contracted in those position where vmap would expect
         # to find a mapping axis
-        def deflate(array, axis):
-            if axis is None:
-                return array
-            aval = jax.core.get_aval(array)
-            # delete the indicated axes from teh shape tuple
-            assert isinstance(aval, jax.core.ShapedArray)
-            return aval.update(shape=aval.shape[:axis] + aval.shape[axis + 1 :])
+        def deflate(axis, aval):
+            def deflate_one(axis, aval):
+                assert isinstance(aval, jax.core.ShapedArray)
+                return aval.update(shape=aval.shape[:axis] + aval.shape[axis + 1 :])
 
-        return jax.tree.map(deflate, self.flat_args, ia)
+            if axis is None:
+                return aval
+            if isinstance(aval, tuple):
+                return jax.tree.map(lambda a: deflate_one(axis, a), aval)
+            return deflate_one(axis, aval)
+
+        aval_tree = jax.tree.map(jax.core.get_aval, arg_tuple)
+        return jax.tree.map(
+            deflate, self.in_axes, aval_tree, is_leaf=lambda x: x is None
+        )
 
     def abstract(self, *args, **kwargs):
         return self.shape
@@ -829,17 +833,28 @@ class VmapGF[R](GFI[R]):
                 # TODO: there could be several constraint arguments; have a param count how many
                 return jax.vmap(
                     lambda k, constraint, arg_tuple: jax.core.eval_jaxpr(
-                        j.jaxpr, j.consts, k, constraint, *arg_tuple
+                        j.jaxpr,
+                        j.consts,
+                        k,
+                        constraint,
+                        *jax.tree.flatten(arg_tuple)[0],
                     ),
                     in_axes=(0, 0, self.r.in_axes),
-                )(jax.random.split(args[0], self.n), args[1], args[2:])
+                )(
+                    jax.random.split(args[0], self.n),
+                    args[1],
+                    jax.tree.unflatten(self.r.in_tree, args[2:]),
+                )
 
             return jax.vmap(
                 lambda k, arg_tuple: jax.core.eval_jaxpr(
-                    j.jaxpr, j.consts, k, *arg_tuple
+                    j.jaxpr, j.consts, k, *jax.tree.flatten(arg_tuple)[0]
                 ),
                 in_axes=(0, self.r.in_axes),
-            )(jax.random.split(args[0], self.n), args[1:])
+            )(
+                jax.random.split(args[0], self.n),
+                jax.tree.unflatten(self.r.in_tree, args[1:]),
+            )
 
 
 class MapGF[R, S](GFI[S]):
@@ -871,13 +886,9 @@ class MapGF[R, S](GFI[S]):
         address: Address,
         constraint: Constraint,
     ) -> dict:
-        print(f"map simulating with structure {self.structure}")
         return Simulate(key, address, constraint).run(
             self.jaxpr, arg_tuple, self.structure
         )
-        # v = self.gfi.simulate_p(key, arg_tuple, address, constraint)
-        # v["retval"] = self.f(v["retval"])
-        # return v
 
     def __matmul__(self, address: str) -> S:
         # TODO (Q): can we declare multiple returns and drop the brackets?
@@ -896,3 +907,9 @@ def to_constraint(trace: dict) -> Constraint:
     if "subtraces" in trace:
         return {k: to_constraint(v) for k, v in trace["subtraces"].items()}
     return trace["retval"]
+
+
+def to_score(trace: dict) -> Float:
+    if "subtraces" in trace:
+        return sum(jnp.sum(to_score(v)) for v in trace["subtraces"].values())
+    return trace.get("score", 0.0)

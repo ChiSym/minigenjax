@@ -108,6 +108,9 @@ def test_normal_model():
         },
     }
     assert tr == expected
+    c, score, retval = model1(10.0).propose(key0)
+    assert c == {"x": tr["subtraces"]["x"]["retval"]}
+    assert score == tr["subtraces"]["x"]["score"]
 
 
 def test_uniform_model():
@@ -173,6 +176,9 @@ def test_model_vmap():
         tr["subtraces"]["b"]["subtraces"]["x"]["score"],
         jnp.array([-0.6931472, -0.6931472, -0.6931472, -0.6931472, -0.6931472]),
     )
+    assert to_score(tr) == jnp.sum(
+        tr["subtraces"]["b"]["subtraces"]["x"]["score"]
+    ) + jnp.sum(tr["subtraces"]["a"]["subtraces"]["x"]["score"])
 
 
 def test_distribution_as_sampler():
