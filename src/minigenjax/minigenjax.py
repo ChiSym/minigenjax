@@ -147,6 +147,25 @@ class Distribution(GenPrimitive):
             case _:
                 raise NotImplementedError(f"{self.name}.{kwargs['op']}")
 
+    def simulate_p(
+        self,
+        key: PRNGKeyArray,
+        arg_tuple: tuple,
+        address: Address,
+        constraint: Constraint | None,
+    ):  
+        if constraint is not None: # TODO: fishy
+            score = self.bind(constraint, *arg_tuple[1:], op="Score")
+            ans = {"w": score, "retval": constraint}
+        else:
+            retval = self.bind(
+                key, *arg_tuple[1:], op="Sample"
+            )
+            score = self.bind(retval, *arg_tuple[1:], op="Score")
+            ans = {"retval": retval, "score": score}
+        return ans
+
+
     def __call__(self, *args):
         this = self
 
@@ -379,11 +398,10 @@ class Transformation[R]:
         else:
             return self.constraint
 
-    def get_sub_constraint(self, a: str) -> Constraint:
-        d = self.constraint.get(a, {})
-        if not isinstance(d, dict):
-            return {}
-        return d
+    def get_sub_constraint(self, a: str) -> Constraint | Float:
+        if self.constraint is None:
+            return None
+        return self.constraint.get(a)
 
     def construct_retval(self, retval) -> R:
         return retval
@@ -506,23 +524,6 @@ class Simulate(Transformation[dict]):
                 )
             u = jax.tree.unflatten(jax.tree.structure(shape), ans)
             return self.record(u, at)
-
-        # we regard the presence of constraints as enabling importance mode,
-        # so you can't do an importance over empty constraints to get a zero
-        # score; instead, that will be interpreted as a regular simulate.
-        if isinstance(eqn.primitive, Distribution):
-            at = bind_params["at"]
-            addr = self.address + (at,)
-            if (retval := self.apply_constraint(at)) is not None:
-                score = eqn.primitive.bind(retval, *params[1:], op="Score")
-                ans = {"w": score, "retval": retval}
-            else:
-                retval = eqn.primitive.bind(
-                    self.get_sub_key(), *params[1:], op="Sample"
-                )
-                score = eqn.primitive.bind(retval, *params[1:], op="Score")
-                ans = {"retval": retval, "score": score}
-            return self.record(ans, at)
 
         if isinstance(eqn.primitive, GenPrimitive):
             at = bind_params["at"]
