@@ -13,6 +13,7 @@ from .distribution import (
     Uniform,
     Categorical,
     Bernoulli,
+    Mixture,
     MvNormalDiag,
 )
 
@@ -29,6 +30,7 @@ __all__ = [
     "Constraint",
     "Categorical",
     "Bernoulli",
+    "Mixture",
     "MvNormalDiag",
     "Scan",
     "pytree",

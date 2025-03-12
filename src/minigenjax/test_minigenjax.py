@@ -186,7 +186,7 @@ def test_distribution_as_sampler():
         return lambda f: jax.vmap(f)(jax.random.split(key0, n))
 
     assert jnp.allclose(
-        vmap(10)(Normal(0.0, 0.01)),
+        vmap(10)(Normal(0.0, 0.01).sample),
         jnp.array(
             [
                 -0.00449334,
@@ -203,7 +203,7 @@ def test_distribution_as_sampler():
         ),
     )
     assert jnp.allclose(
-        vmap(10)(Uniform(5.0, 6.0)),
+        vmap(10)(Uniform(5.0, 6.0).sample),
         jnp.array(
             [
                 5.3265953,
@@ -220,15 +220,15 @@ def test_distribution_as_sampler():
         ),
     )
     assert jnp.allclose(
-        vmap(10)(Flip(0.5)),
+        vmap(10)(Flip(0.5).sample),
         jnp.array([1, 1, 1, 0, 1, 1, 0, 1, 1, 0]),
     )
     assert jnp.allclose(
-        vmap(10)(Categorical(logits=jnp.array([1.1, -1.0, 0.9]))),
+        vmap(10)(Categorical(logits=jnp.array([1.1, -1.0, 0.9])).sample),
         jnp.array([0, 0, 2, 2, 0, 1, 0, 0, 0, 0]),
     )
     assert jnp.allclose(
-        vmap(10)(MvNormalDiag(jnp.array([1.0, 10.0, 100.0]), 0.1 * jnp.ones(3))),
+        vmap(10)(MvNormalDiag(jnp.array([1.0, 10.0, 100.0]), 0.1 * jnp.ones(3)).sample),
         jnp.array(
             [
                 [1.0678201, 9.900013, 100.02386],
@@ -241,6 +241,29 @@ def test_distribution_as_sampler():
                 [0.9468851, 9.946305, 99.93078],
                 [0.9302361, 9.9734125, 99.82939],
                 [1.0136702, 9.983562, 99.88976],
+            ]
+        ),
+    )
+
+
+def test_mixture():
+    m = Mixture(Categorical(probs=[0.3, 0.7]), [Normal(0.0, 1.0), Normal(10.0, 1.0)])
+    ys = jax.vmap(m.sample)(jax.random.split(key0, 10))
+    print(ys)
+    assert jnp.allclose(
+        ys,
+        jnp.array(
+            [
+                12.664838,
+                0.14686993,
+                -1.2831976,
+                10.281769,
+                -0.5806916,
+                9.012323,
+                10.005001,
+                10.695513,
+                0.5217198,
+                9.937291,
             ]
         ),
     )

@@ -1,6 +1,6 @@
 from . import minigenjax as mg
 from jax.interpreters import mlir
-from jaxtyping import PRNGKeyArray
+from jaxtyping import Array, PRNGKeyArray, Float
 import tensorflow_probability.substrates.jax as tfp
 import jax.numpy as jnp
 
@@ -48,9 +48,12 @@ class Distribution(mg.GenPrimitive):
         return ans
 
     def assess_p(
-        self, arg_tuple: tuple, constraint: mg.Constraint, address: tuple[str, ...]
-    ):
-        # v = self.apply_constraint(bind_params["at"])
+        self,
+        arg_tuple: tuple,
+        constraint: mg.Constraint | Float,
+        address: tuple[str, ...],
+    ) -> tuple[Array, Array]:
+        assert not isinstance(constraint, dict)
         score = self.bind(constraint, *arg_tuple[1:], op="Score")
         return constraint, score
 
@@ -61,8 +64,13 @@ class Distribution(mg.GenPrimitive):
             def __matmul__(self, address: str):
                 return this.bind(mg.PHANTOM_KEY, *args, at=address)
 
-            def __call__(self, key: PRNGKeyArray):
-                return this.tfd_ctor(*args).sample(seed=key)
+            def to_tfp(self):
+                return this.tfd_ctor(*args)
+
+            def sample(self, key: PRNGKeyArray):
+                return self.to_tfp().sample(seed=key)
+
+            # TODO: from here, you can't `map` a distribution.
 
         return Binder()
 
@@ -86,6 +94,17 @@ CategoricalL = Distribution(
 CategoricalP = Distribution(
     "Categorical:P",
     lambda probs: tfp.distributions.Categorical(probs=probs),
+)
+
+# TODO: This can't be stored as a JAX eqn, since it involves a list, sub-constructors,
+# etc., so it's useless for now. Doing this in our current system would involve
+# flattening the parameters, and storing the underlying distribution names in the
+# bind parameters, which is probably not worth it
+Mixture = Distribution(
+    "Mixture",
+    lambda cat, components: tfp.distributions.Mixture(
+        cat=cat.to_tfp(), components=list(map(lambda c: c.to_tfp(), components))
+    ),
 )
 
 
