@@ -58,7 +58,7 @@ class GenPrimitive(jx.core.Primitive):
         raise NotImplementedError(f"simulate_p: {self}")
 
     def assess_p(
-        self, arg_tuple: tuple, constraint: Constraint, address: tuple[str, ...]
+        self, arg_tuple: tuple, constraint: Constraint | Float, address: tuple[str, ...]
     ) -> tuple[Array, Array]:
         raise NotImplementedError(f"assess_p: {self}")
 

@@ -183,7 +183,7 @@ clutters_plot = (
 @mg.pytree
 class Pose:
     p: Array
-    hd: ArrayLike
+    hd: Array
 
     def __repr__(self):
         return f"Pose(p={self.p}, hd={self.hd})"
@@ -348,6 +348,13 @@ def random_pose(k):
 
 
 some_poses = jax.vmap(random_pose)(jax.random.split(key, 20))
+
+my_f = lambda v: v[0]
+leaves, treedef = jax.tree.flatten(some_poses)
+some_poses.as_dict()
+# treedef.unflatten(my_f(*xs) for xs in zip(*leaves))
+
+# %%
 
 (world_plot + pose_plots(some_poses, color="green") + {"title": "Some poses"})
 
@@ -870,27 +877,26 @@ some_poses
 # %%
 # Even mixture of uniform priors over two rooms.
 
-room_mixture = jnp.ones(2) / 2
-room1 = jnp.array([[12.83, 15.81], [11.19, 15.26], [-jnp.pi, +jnp.pi]])
-room2 = jnp.array([[15.73, 18.90], [5.79, 9.57], [-jnp.pi, +jnp.pi]])
-
-two_room_prior = genjax.mix(
-    uniform_pose.partial_apply(room1[:, 0], room1[:, 1]),
-    uniform_pose.partial_apply(room2[:, 0], room2[:, 1]),
-).partial_apply(jnp.log(room_mixture), (), ())
+room1 = mg.Uniform(
+    jnp.array([12.83, 11.19, -jnp.pi]), jnp.array([15.81, 15.26, jnp.pi])
+)
+room2 = mg.Uniform(jnp.array([15.73, 5.79, -jnp.pi]), jnp.array([18.90, 9.57, +jnp.pi]))
 
 
-def two_room_cm_builder(pose):
-    return C["mixture_component"].set(jnp.array(pose.p[1] < 10, int)) | C[
-        "component_sample", "p_array"
-    ].set(pose.as_array())
+@mg.Gen
+def two_room_prior():
+    i = mg.Flip(0.5) @ "f"
+    x, y, hd = mg.Cond(room1, room2)(i) @ "p"
+    return Pose(jnp.array([x, y]), hd)
 
 
 # %%
 key, sub_key = jax.random.split(key)
-some_poses = jax.vmap(lambda k: two_room_prior.simulate(k, ()))(
-    jax.random.split(sub_key, 100)
-).get_retval()
+some_poses = jax.vmap(two_room_prior().simulate)(jax.random.split(sub_key, 100))[
+    "retval"
+]
+
+# %%
 
 (world_plot + pose_plots(some_poses, color="green") + {"title": "Some poses"})
 
