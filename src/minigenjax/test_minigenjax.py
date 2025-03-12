@@ -56,8 +56,7 @@ def coefficient():
     return Normal(0.0, 1.0) @ "c"
 
 
-@jax.tree_util.register_dataclass
-@dataclasses.dataclass
+@pytree
 class Poly:
     coefficients: jax.Array
 
@@ -93,6 +92,16 @@ def test_pytree():
     assert jnp.allclose(
         tr["retval"], jnp.array([3.37815, 1.3831037, 1.1251557, 2.533188])
     )
+
+def test_pytree_iteration():
+    poly = coefficient().repeat(3).map(Poly)
+    tr = jax.vmap(poly.simulate)(jax.random.split(key0, 100))
+    ps = tr["retval"]
+    # switch from plural Poly to list of Polys
+    list_of_p = [p for p in ps]
+    assert len(list_of_p) == 100
+    assert jnp.allclose(list_of_p[0].coefficients, ps[0].coefficients)
+    assert jnp.allclose(list_of_p[99].coefficients, ps[99].coefficients)
 
 
 # %%

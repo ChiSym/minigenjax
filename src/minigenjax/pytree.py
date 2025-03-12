@@ -13,10 +13,15 @@ class IterablePytree:
         return (self.__getitem__(i) for i in range(self.__len__()))
 
 
-def pytree[R](cls: type) -> type:
+def pytree(cls: type) -> type:
     T = type(
         cls.__name__,
-        (dataclasses.dataclass(cls), IterablePytree),
-        {},
+        (IterablePytree, dataclasses.dataclass(cls)),
+        {
+            "attributes_dict": lambda self: {
+                field.name: getattr(self, field.name)
+                for field in dataclasses.fields(self)
+            }
+        },
     )
     return jax.tree_util.register_dataclass(T)
