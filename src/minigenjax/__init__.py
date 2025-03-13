@@ -3,6 +3,7 @@ from .minigenjax import (
     Cond,
     to_constraint,
     to_score,
+    MissingConstraint,
     Constraint,
     Scan,
 )
@@ -30,6 +31,7 @@ __all__ = [
     "Constraint",
     "Categorical",
     "Bernoulli",
+    "MissingConstraint",
     "Mixture",
     "MvNormalDiag",
     "Scan",

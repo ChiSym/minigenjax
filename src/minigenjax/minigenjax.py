@@ -25,6 +25,10 @@ flatten_fun_nokwargs: Callable[[jx.linear_util.WrappedFun, Any], WrappedFunWithA
 )
 
 
+class MissingConstraint(Exception):
+    pass
+
+
 class GenPrimitive(jx.core.Primitive):
     def __init__(self, name):
         super().__init__(name)
@@ -294,21 +298,15 @@ class Transformation[R]:
         if len(b.jaxpr.eqns) == 1 and isinstance(b.jaxpr.eqns[0].primitive, GF):
             return b.jaxpr.eqns[0].params.get("at")
 
-    def apply_constraint(self, addr: str) -> ArrayLike | None:
-        if isinstance(self.constraint, dict):
-            v = self.constraint.get(addr)
-            if isinstance(v, dict):
-                raise Exception(
-                    "broken constraint: {addr} in {self.address} is not a leaf"
-                )
-            return v
-        else:
-            return self.constraint
-
-    def get_sub_constraint(self, a: str) -> Constraint | Float:
+    def get_sub_constraint(self, a: str, required: bool = False) -> Constraint | Float:
         if self.constraint is None:
-            return None
-        return self.constraint.get(a)
+            c = None
+        else:
+            c = self.constraint.get(a)
+        if required and c is None:
+            print(f"get_sub_c {self.constraint} @ {a}")
+            raise MissingConstraint(self.address + (a,))
+        return c
 
     def construct_retval(self, retval) -> R:
         return retval
@@ -319,12 +317,43 @@ class Assess(Transformation[Array]):
         super().__init__(PHANTOM_KEY, address, constraint)
         self.score = jnp.array(0.0)
 
+    def transform_inner(
+        self, jaxpr, in_avals, addr: str, constraint: Constraint | None = None
+    ):
+        """Apply simulate to jaxpr and return the transformed jaxpr together
+        with its return shape."""
+        print(f"xf-assess-inner {addr} {constraint} ")
+        # reduced_constraint = jax.tree.map(lambda v: v[0], constraint)
+        return jax.make_jaxpr(
+            lambda co, in_avals: Assess(self.address + (addr,), co).run(
+                jaxpr, in_avals
+            ),
+            return_shape=True,
+        )(constraint, in_avals)
+
     def handle_eqn(self, eqn: jx.core.JaxprEqn, params, bind_params):
+        if isinstance(eqn.primitive, VmapGF):
+            at = bind_params["at"]
+            assert at == VmapGF.SUB_TRACE
+            transformed, shape = self.transform_inner(
+                bind_params["inner"], eqn.primitive.reduced_avals, at, self.constraint
+            )
+            new_params = bind_params | {"inner": transformed}
+            # TODO: the below is sus. Aren't the params already flat here?
+            flat_params, _ = jax.tree.flatten(params)
+            flat_constraint, _ = jax.tree.flatten(self.constraint)
+            print(f"constraint len {len(flat_constraint)}")
+            ans, score = eqn.primitive.Assess(eqn.primitive, shape).bind(
+                *flat_constraint, *flat_params, **new_params
+            )
+            self.score += ans
+            return ans
+
         if isinstance(eqn.primitive, GenPrimitive):
             at = bind_params["at"]
             addr = self.address + (at,)
             ans, score = eqn.primitive.assess_p(
-                params, self.get_sub_constraint(at), addr
+                params, self.get_sub_constraint(at, required=True), addr
             )
             self.score += score
             return ans
@@ -365,19 +394,19 @@ class Simulate(Transformation[dict]):
                 return_shape=True,
             )(PHANTOM_KEY, in_avals)
 
-    def record(self, subtrace, at):
+    def record(self, sub_trace, at):
         if (
-            (inner_trace := subtrace.get("subtraces"))
+            (inner_trace := sub_trace.get("subtraces"))
             and len(keys := inner_trace.keys()) == 1
             and (key := next(iter(keys))).startswith("__")
         ):
             # absorb interstitial trace points like __repeat, __vmap that may
             # occur when combinators are stacked.
-            subtrace["subtraces"] = inner_trace[key]["subtraces"]
+            sub_trace["subtraces"] = inner_trace[key]["subtraces"]
         if at:
-            self.trace[at] = subtrace
-        self.w += jnp.sum(subtrace.get("w", 0.0))
-        return subtrace["retval"]
+            self.trace[at] = sub_trace
+        self.w += jnp.sum(sub_trace.get("w", 0.0))
+        return sub_trace["retval"]
 
     def handle_eqn(self, eqn: jx.core.JaxprEqn, params, bind_params):
         if isinstance(eqn.primitive, RepeatGF):
@@ -693,9 +722,12 @@ class VmapGF[R](GFI[R]):
         tr = Simulate(key, address, {VmapGF.SUB_TRACE: constraint}).run(
             self.jaxpr, arg_tuple
         )["subtraces"][VmapGF.SUB_TRACE]
-        # if "w" in tr:
-        #     tr["w"] = jnp.sum(tr["w"])
         return tr
+
+    def assess_p(
+        self, arg_tuple: tuple, constraint: Constraint, address: tuple[str, ...]
+    ) -> Float:
+        return Assess(address, constraint).run(self.jaxpr, arg_tuple)
 
     def __matmul__(self, address: str) -> R:
         return self.bind(
@@ -708,9 +740,9 @@ class VmapGF[R](GFI[R]):
     def get_jaxpr(self) -> jx.core.ClosedJaxpr:
         return self.jaxpr
 
-    class Simulate[S](GFI[S]):
+    class Simulate(GenPrimitive):
         def __init__(
-            self, r: "VmapGF[S]", shape: Any, has_constraint: bool
+            self, r: "VmapGF", shape: Any, has_constraint: bool
         ):  # TODO: PyTreeDef?
             super().__init__("Vmap.Simulate")
             self.r = r
@@ -757,6 +789,9 @@ class VmapGF[R](GFI[R]):
                 jax.random.split(args[0], self.n),
                 jax.tree.unflatten(self.r.in_tree, args[1:]),
             )
+
+    class Assess(GenPrimitive):
+        pass
 
 
 class MapGF[R, S](GFI[S]):
