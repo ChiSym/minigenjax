@@ -1,6 +1,5 @@
 # %%
 # pyright: reportWildcardImportFromLibrary=false
-import dataclasses
 import math
 import jax
 import jax.numpy as jnp
@@ -92,6 +91,7 @@ def test_pytree():
     assert jnp.allclose(
         tr["retval"], jnp.array([3.37815, 1.3831037, 1.1251557, 2.533188])
     )
+
 
 def test_pytree_iteration():
     poly = coefficient().repeat(3).map(Poly)
@@ -692,6 +692,29 @@ def test_assess():
     w = q().assess({"p": constraints})
     assert w == -6.0428767
 
+    with pytest.raises(MissingConstraint) as e:
+        _ = p().assess({"x": 2.0})
+    assert e.value.args == (("y",),)
+
+    with pytest.raises(MissingConstraint) as e:
+        _ = p().assess({"y": 2.0})
+    assert e.value.args == (("x",),)
+
+
+@pytest.mark.skip(reason="not ready yet")
+def test_assess_vmap():
+    @Gen
+    def p(a, b):
+        x = Normal(a, 1.0) @ "x"
+        y = Normal(b, 1.0) @ "y"
+        return x, y
+
+    model = p.vmap(in_axes=(0, None))(jnp.arange(5.0), 6.0)
+    tr = model.simulate(key0)
+    print(tr)
+    w = model.assess({"x": jnp.arange(5.0) + 0.1, "y": 6.1})
+    assert w == 0.0
+
 
 def test_bernoulli():
     @Gen
@@ -772,6 +795,9 @@ def test_vmap_importance():
     tr, w = mv_imp(key0, {"a": values})
     assert w == 3.534588
     assert jnp.allclose(tr["subtraces"]["a"]["retval"], observed_values)
+
+    # tr, w = mv_imp(key0,{"a": values, "b": values+0.1})
+    # assert w == 3.333333
 
 
 # %%
