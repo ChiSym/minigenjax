@@ -14,6 +14,11 @@ def model1(b):
 
 
 @Gen
+def void_model(b):
+    _ = Normal(b, 9.1) @ "b"
+
+
+@Gen
 def model2(b):
     return Uniform(b, b + 2.0) @ "x"
 
@@ -92,6 +97,22 @@ def test_pytree():
         tr["retval"], jnp.array([3.37815, 1.3831037, 1.1251557, 2.533188])
     )
 
+    @Gen
+    def wrap_poly():
+        p = poly @ "p"
+        return p
+
+    tr = jax.jit(wrap_poly().simulate)(key0)
+    assert isinstance(tr["retval"], Poly)
+
+    @Gen
+    def wrap_poly2():
+        cs = coefficient().repeat(3) @ "cs"
+        return Poly(cs)
+
+    tr = jax.jit(wrap_poly2().simulate)(key0)
+    assert isinstance(tr["retval"], Poly)
+
 
 def test_pytree_iteration():
     poly = coefficient().repeat(3).map(Poly)
@@ -120,6 +141,8 @@ def test_normal_model():
     c, score, retval = model1(10.0).propose(key0)
     assert c == {"x": tr["subtraces"]["x"]["retval"]}
     assert score == tr["subtraces"]["x"]["score"]
+
+    tr = void_model(10.0).simulate(key0)
 
 
 def test_uniform_model():
@@ -151,7 +174,6 @@ def test_logit_vs_probs():
         return g, p
 
     tr = model().simulate(key0)
-    print(jax.make_jaxpr(model().simulate)(key0))
     assert tr["subtraces"]["l"]["retval"] == 1.0
     assert (
         tr["subtraces"]["l"]["score"]
@@ -258,7 +280,6 @@ def test_distribution_as_sampler():
 def test_mixture():
     m = Mixture(Categorical(probs=[0.3, 0.7]), [Normal(0.0, 1.0), Normal(10.0, 1.0)])
     ys = jax.vmap(m.sample)(jax.random.split(key0, 10))
-    print(ys)
     assert jnp.allclose(
         ys,
         jnp.array(
@@ -344,6 +365,18 @@ def test_ordinary_cond():
     tr = f().simulate(key0)
     assert tr["retval"] == -12.5153885
     assert tr["subtraces"]["n"]["retval"] == -1.2515389
+
+
+def test_cond_of_two_distributions():
+    @Gen
+    def m():
+        f = Flip(0.5) @ "f"
+        p = Cond(Normal(10.0, 0.1), Normal(1.0, 0.1))(f) @ "p"
+        return f, p
+
+    tr = m().simulate(key0)
+    assert tr["subtraces"]["f"]["retval"] == 1.0
+    assert tr["subtraces"]["p"]["retval"] == 10.014389
 
 
 def test_intervening_functions():
@@ -687,9 +720,10 @@ def test_assess():
         return p() @ "p"
 
     constraints = {"x": 2.0, "y": 2.1}
-    w = p().assess(constraints)
+    w, retval = p().assess(constraints)
     assert w == -6.0428767
-    w = q().assess({"p": constraints})
+    assert retval == (2.0, 2.1)
+    w, retval = q().assess({"p": constraints})
     assert w == -6.0428767
 
     with pytest.raises(MissingConstraint) as e:
@@ -701,7 +735,7 @@ def test_assess():
     assert e.value.args == (("x",),)
 
 
-@pytest.mark.skip(reason="not ready yet")
+# @pytest.mark.skip(reason="not ready yet")
 def test_assess_vmap():
     @Gen
     def p(a, b):
@@ -709,11 +743,12 @@ def test_assess_vmap():
         y = Normal(b, 1.0) @ "y"
         return x, y
 
-    model = p.vmap(in_axes=(0, None))(jnp.arange(5.0), 6.0)
-    tr = model.simulate(key0)
-    print(tr)
-    w = model.assess({"x": jnp.arange(5.0) + 0.1, "y": 6.1})
-    assert w == 0.0
+    model = p.vmap()(jnp.arange(5.0), 10.0 + jnp.arange(5.0))
+    w, retval = model.assess(
+        {"x": jnp.arange(5.0) + 0.1, "y": 10.0 + jnp.arange(5.0) + 0.2}
+    )
+    print(retval)
+    assert w == -9.314385
 
 
 def test_bernoulli():
@@ -782,22 +817,23 @@ def test_repeat_importance():
 
 def test_vmap_importance():
     @Gen
-    def model(z):
-        a = Normal(z, 0.1) @ "a"
-        b = Normal(z, 1.0) @ "b"
+    def model(x, y):
+        a = Normal(x, 0.1) @ "a"
+        b = Normal(y, 0.2) @ "b"
         return a + b
 
-    values = jnp.arange(4.0)
-    mv = model.vmap()(values)
-    mv_imp = jax.jit(mv.importance)
-    observed_values = values + 0.1
-    values = jnp.array(observed_values)
-    tr, w = mv_imp(key0, {"a": values})
-    assert w == 3.534588
-    assert jnp.allclose(tr["subtraces"]["a"]["retval"], observed_values)
-
-    # tr, w = mv_imp(key0,{"a": values, "b": values+0.1})
-    # assert w == 3.333333
+    values = jnp.arange(5.0)
+    mv1 = model.vmap(in_axes=(0, None))(values, 10.0)
+    mv1_imp = jax.jit(mv1.importance)
+    observed_values = values + 0.2
+    tr, w1 = mv1_imp(key0, {"a": observed_values})
+    assert w1 == -3.0817661
+    mv2 = model.vmap(in_axes=(None, 0))(10.0, values)
+    tr, w2 = jax.jit(mv2.importance)(key0, {"b": observed_values})
+    assert w2 == 0.95249736
+    mv3 = model.vmap()(values, values)
+    tr, w3 = jax.jit(mv3.importance)(key0, {"a": observed_values, "b": observed_values})
+    assert w3 == w2 + w1
 
 
 # %%
