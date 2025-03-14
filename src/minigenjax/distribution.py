@@ -55,7 +55,7 @@ class Distribution(mg.GenPrimitive):
     ) -> tuple[Array, Array]:
         assert not isinstance(constraint, dict)
         score = self.bind(constraint, *arg_tuple[1:], op="Score")
-        return constraint, score
+        return score, constraint
 
     def __call__(self, *args):
         this = self

@@ -348,14 +348,6 @@ def random_pose(k):
 
 
 some_poses = jax.vmap(random_pose)(jax.random.split(key, 20))
-
-my_f = lambda v: v[0]
-leaves, treedef = jax.tree.flatten(some_poses)
-some_poses.as_dict()
-# treedef.unflatten(my_f(*xs) for xs in zip(*leaves))
-
-# %%
-
 (world_plot + pose_plots(some_poses, color="green") + {"title": "Some poses"})
 
 
@@ -862,7 +854,7 @@ whole_map_prior = uniform_pose(world["bounding_box"][:, 0], world["bounding_box"
 
 
 def whole_map_cm_builder(pose):
-    return C["p_array"].set(pose.as_array())
+    return {"p_array": pose.as_array()}
 
 
 # %%
@@ -890,6 +882,10 @@ def two_room_prior():
     return Pose(jnp.array([x, y]), hd)
 
 
+def two_room_cm_builder(pose):
+    return {"f": pose.p[1] < 10, "p": pose.as_array()}
+
+
 # %%
 key, sub_key = jax.random.split(key)
 some_poses = jax.vmap(two_room_prior().simulate)(jax.random.split(sub_key, 100))[
@@ -906,27 +902,27 @@ pose_for_localized_prior = Pose(jnp.array([2.0, 16.0]), jnp.array(0.0))
 spread_of_localized_prior = (0.1, 0.75)
 
 
-@genjax.gen
+@mg.Gen
 def localized_prior():
     p = (
-        genjax.mv_normal_diag(
+        mg.MvNormalDiag(
             pose_for_localized_prior.p, spread_of_localized_prior[0] * jnp.ones(2)
         )
         @ "p"
     )
-    hd = genjax.normal(pose_for_localized_prior.hd, spread_of_localized_prior[1]) @ "hd"
+    hd = mg.Normal(pose_for_localized_prior.hd, spread_of_localized_prior[1]) @ "hd"
     return Pose(p, hd)
 
 
 def localized_cm_builder(pose):
-    return C["p"].set(pose.p) | C["hd"].set(pose.hd)
+    return {"p": pose.p, "hd": pose.hd}
 
 
 # %%
 key, sub_key = jax.random.split(key)
-some_poses = jax.vmap(lambda k: localized_prior.simulate(k, ()))(
-    jax.random.split(sub_key, 100)
-).get_retval()
+some_poses = jax.vmap(localized_prior().simulate)(jax.random.split(sub_key, 100))[
+    "retval"
+]
 
 (world_plot + pose_plots(some_poses, color="green") + {"title": "Some poses"})
 
@@ -936,22 +932,22 @@ some_poses = jax.vmap(lambda k: localized_prior.simulate(k, ()))(
 # %%
 model_dispatch = {
     "whole_map": (whole_map_prior, whole_map_cm_builder),
-    "two_room": (two_room_prior, two_room_cm_builder),
-    "localized": (localized_prior, localized_cm_builder),
+    "two_room": (two_room_prior(), two_room_cm_builder),
+    "localized": (localized_prior(), localized_cm_builder),
 }
 
 
 def make_posterior_density_fn(prior_label, readings, model_noise):
     prior, cm_builder = model_dispatch[prior_label]
 
-    @genjax.gen
+    @mg.Gen
     def joint_model():
-        pose = prior() @ "pose"
+        pose = prior @ "pose"
         sensor = sensor_model(pose, sensor_angles, model_noise) @ "sensor"
 
     return jax.jit(
-        lambda pose: joint_model.assess(
-            C["pose"].set(cm_builder(pose)) | C["sensor", "distance"].set(readings), ()
+        lambda pose: joint_model().assess(
+            {"pose": cm_builder(pose), "sensor": {"distance": readings}}
         )[0]
     )
 
@@ -1127,7 +1123,7 @@ camera_widget(
     ),
     bottom_elements=(
         Plot.html(
-            # For some reason `toFixed` very stubbonrly malfunctions in the following line:
+            # For some reason `toFixed` very stubbornly malfunctions in the following line:
             Plot.js("""$state.target_exists ?
                                 `best = Pose([${$state.best.p.map((x) => x.toFixed(2))}], ${$state.best.hd.toFixed(2)})` : ''""")
         )
