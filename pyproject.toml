@@ -10,7 +10,7 @@ license = "Apache 2.0"
 readme = "README.md"
 
 [tool.poetry.dependencies]
-python = "^3.12"
+python = "^3.11"
 tensorflow-probability = {extras = ["jax"], version = "^0.25.0"}
 jax = "0.4.38"
 jaxtyping = "^0.2.34"
