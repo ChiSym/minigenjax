@@ -11,9 +11,19 @@ def model2p(x, y):
 
 def print_model_jaxprs():
     def print_sim_jaxpr(m, *args):
-        j = jax.make_jaxpr(m(*args).simulate)(jax.random.key(0))
+        key0 = jax.random.key(0)
+        j = jax.make_jaxpr(m(*args).simulate)(key0)
+        print("/* simulate */\n", j)
         print("-" * 72)
-        print(j)
+        try:
+            tr = m(*args).simulate(key0)
+            cm = minigenjax.to_constraint(tr)
+            ja = jax.make_jaxpr(m(*args).assess)(cm)
+            print("/* assess */\n", ja)
+            print("-" * 72)
+        except Exception:
+            print("----- no assess yet ")
+            pass
 
     print_sim_jaxpr(model1, 11.0)
     print_sim_jaxpr(model2, 12.0)

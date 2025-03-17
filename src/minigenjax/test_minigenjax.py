@@ -735,7 +735,6 @@ def test_assess():
     assert e.value.args == (("x",),)
 
 
-# @pytest.mark.skip(reason="not ready yet")
 def test_assess_vmap():
     @Gen
     def p(a, b):
