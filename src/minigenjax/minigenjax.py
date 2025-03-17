@@ -173,7 +173,7 @@ class GF[R](GFI[R]):
     def assess_p(
         self, arg_tuple: tuple, constraint: Constraint, address
     ) -> tuple[Float, R]:
-        a = Assess(address, constraint)
+        a = Assess[R](address, constraint)
         retval = a.run(self.jaxpr, arg_tuple, self.structure)
         return a.score, retval
 
@@ -321,13 +321,14 @@ class Assess[R](Transformation[R]):
                 cons = self.get_sub_constraint(at)
             else:
                 cons = self.constraint
+
             transformed, shape = self.transform_inner(
                 bind_params["inner"], eqn.primitive.reduced_avals, at, cons
             )
             new_params = bind_params | {"inner": transformed}
             # TODO: the below is sus. Aren't the params already flat here?
             flat_params, _ = jax.tree.flatten(params)
-            flat_constraint, _ = jax.tree.flatten(self.constraint)
+            flat_constraint, _ = jax.tree.flatten(cons)
             score, ans = jax.tree.unflatten(
                 jax.tree.structure(shape),
                 eqn.primitive.Assess(
@@ -343,7 +344,7 @@ class Assess[R](Transformation[R]):
             score, ans = eqn.primitive.assess_p(
                 params, self.get_sub_constraint(at, required=True), addr
             )
-            self.score += score
+            self.score += jnp.sum(score)
             return ans
 
         return super().handle_eqn(eqn, params, bind_params)
@@ -649,7 +650,6 @@ class VmapGF[R](GFI[R]):
         # TODO: consider if we want to make this
         self.arg_tuple = arg_tuple
         self.flat_args, self.in_tree = jax.tree.flatten(self.arg_tuple)
-        self.flat_args = tuple(self.flat_args)
         self.in_axes = in_axes
         # find one pair of (parameter number, axis) to use to determine size of vmap
         if isinstance(self.in_axes, tuple):
@@ -778,6 +778,9 @@ class VmapGF[R](GFI[R]):
             self.constraint_count = constraint_count
             self.multiple_results = True
             self.vmap_constraint = vmap_constraint
+            mlir.register_lowering(
+                self, mlir.lower_fun(self.impl, self.multiple_results)
+            )
 
         def abstract(self, *args, **kwargs):
             return [

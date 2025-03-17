@@ -117,15 +117,13 @@ imp = jax.jit(model(xs).importance)
 observations: mg.Constraint = {"ys": {"y": {"value": ys}}}
 imp(sub_key, observations)
 # %%
-print(
-    jax.make_jaxpr(lambda k: model(xs).importance(k, observations)["retval"])(sub_key)
-)
+print(jax.make_jaxpr(lambda k: model(xs).importance(k, observations))(sub_key))
 
 # %%
 key, sub_key = jax.random.split(key)
-tr = jax.vmap(lambda k: imp(k, observations))(jax.random.split(sub_key, 50000))
+tr, ws = jax.vmap(lambda k: imp(k, observations))(jax.random.split(sub_key, 500000))
 key, sub_key = jax.random.split(sub_key)
-winners = jax.vmap(mg.Categorical(logits=tr["w"]))(jax.random.split(sub_key, 100))
+winners = jax.vmap(mg.Categorical(logits=ws).sample)(jax.random.split(sub_key, 100))
 posterior_ps = tr["subtraces"]["p"]["retval"][winners]
 plot_curves(posterior_ps)
 # %%
