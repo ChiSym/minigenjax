@@ -1,35 +1,56 @@
+import functools
 from . import minigenjax as mg
+import jax
+import jax.core
 from jax.interpreters import mlir
-from jaxtyping import Array, PRNGKeyArray, Float
+from jaxtyping import Array, PRNGKeyArray, Float, DTypeLike
 import tensorflow_probability.substrates.jax as tfp
 import jax.numpy as jnp
 
 
 class Distribution(mg.GenPrimitive):
-    def __init__(self, name, tfd_ctor):
+    def __init__(self, name, tfd_ctor, dtype: DTypeLike = jnp.dtype("float32")):
         super().__init__(name)
         self.tfd_ctor = tfd_ctor
+        self.dtype = dtype
         mlir.register_lowering(self, mlir.lower_fun(self.impl, False))
 
+    def batch(self, vector_args, batch_axes, **kwargs):
+        if axes := kwargs.pop("axes", None):
+            axes = axes + [batch_axes]
+        else:
+            axes = [batch_axes]
+        print(f"binding with axes={axes}")
+        return self.bind(*vector_args, axes=axes, **kwargs), 0
+
+    def operation(self, arg_tuple, op):
+        match op:
+            case "Sample":
+                return self.tfd_ctor(*arg_tuple[1:]).sample(seed=arg_tuple[0])
+            case "Score":
+                return self.tfd_ctor(*arg_tuple[1:]).log_prob(arg_tuple[0])
+
     def abstract(self, *args, **kwargs):
-        return args[1]
+        print(f"distro {self.name} {self.dtype} s1 {args[0].shape} s2 {args[1].shape}")
+        return jax.core.ShapedArray(
+            args[0].shape,
+            jnp.dtype("float32") if kwargs["op"] == "Score" else self.dtype,
+        )
 
     def concrete(self, *args, **kwargs):
-        match kwargs.get("op", "Sample"):
-            case "Sample":
-                # we convert to float here because Bernoulli/Flip will
-                # normally return an int, and that confuses XLA, since
-                # our abstract implementation says the return types are
-                # floats. TODO: consider allowing the marking of integer-
-                # returning distributions as ints are sometimes nice to
-                # work with.
-                return jnp.asarray(
-                    self.tfd_ctor(*args[1:]).sample(seed=args[0]), dtype=float
-                )
-            case "Score":
-                return self.tfd_ctor(*args[1:]).log_prob(args[0])
-            case _:
-                raise NotImplementedError(f"{self.name}.{kwargs['op']}")
+        print(f"concrete {args} {kwargs}")
+        axes = kwargs.get("axes")
+        op = kwargs["op"]
+        if axes:
+            mapper = functools.reduce(
+                lambda f, axes: jax.vmap(f, in_axes=axes),
+                axes,
+                lambda *args: self.operation(args, op),
+            )
+            return mapper(*args)
+        else:
+            retval = self.operation(args, op)
+        return retval
 
     def simulate_p(
         self,
@@ -62,7 +83,7 @@ class Distribution(mg.GenPrimitive):
 
         class Binder:
             def __matmul__(self, address: str):
-                return this.bind(mg.PHANTOM_KEY, *args, at=address)
+                return this.bind(mg.PHANTOM_KEY, *args, op="Sample", at=address)
 
             def to_tfp(self):
                 return this.tfd_ctor(*args)
@@ -78,15 +99,19 @@ class Distribution(mg.GenPrimitive):
 BernoulliL = Distribution(
     "Bernoulli:L",
     lambda logits: tfp.distributions.Bernoulli(logits=logits),
+    dtype=jnp.dtype("int32"),
 )
 BernoulliP = Distribution(
     "Bernoulli:P",
     lambda probs: tfp.distributions.Bernoulli(probs=probs),
+    dtype=jnp.dtype("int32"),
 )
 Normal = Distribution("Normal", tfp.distributions.Normal)
 MvNormalDiag = Distribution("MvNormalDiag", tfp.distributions.MultivariateNormalDiag)
 Uniform = Distribution("Uniform", tfp.distributions.Uniform)
-Flip = Distribution("Flip", lambda p: tfp.distributions.Bernoulli(probs=p))
+Flip = Distribution(
+    "Flip", lambda p: tfp.distributions.Bernoulli(probs=p), dtype=jnp.dtype("int32")
+)
 CategoricalL = Distribution(
     "Categorical:L",
     lambda logits: tfp.distributions.Categorical(logits=logits),
