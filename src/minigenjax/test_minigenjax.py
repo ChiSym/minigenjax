@@ -311,7 +311,7 @@ def test_cond_model():
     tr = c(1).simulate(key0)
     assert jnp.allclose(tr["retval"], jnp.array(99.979416))
     tr = jax.vmap(lambda i, k: c(i).simulate(k))(
-        jnp.mod(jnp.arange(10.0), 2), jax.random.split(key0, 10)
+        jnp.mod(jnp.arange(10), 2), jax.random.split(key0, 10)
     )
     assert jnp.allclose(
         tr["retval"],
@@ -735,6 +735,16 @@ def test_assess():
     assert e.value.args == (("x",),)
 
 
+def test_assess_vmap1():
+    @Gen
+    def p(a):
+        return Normal(a, 0.01) @ "x"
+
+    w, retval = p.vmap()(jnp.arange(5.0)).assess({"x": jnp.arange(5.0) + 0.2})
+    print(retval)
+    assert w == -981.5693
+
+
 def test_assess_vmap():
     @Gen
     def p(a, b):
@@ -809,6 +819,7 @@ def test_repeat_importance():
     mr_imp = jax.jit(mr.importance)
     values = jnp.arange(4) / 10.0
     tr, w = mr_imp(key0, {"a": values})
+    print(tr)
     assert jnp.allclose(tr["subtraces"]["a"]["retval"], values)
     assert w == -141.46541
     assert w == jnp.sum(tr["subtraces"]["a"]["w"])
