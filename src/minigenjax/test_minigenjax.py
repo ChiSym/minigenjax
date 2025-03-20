@@ -483,7 +483,6 @@ class TestCurve:
                 @ "y"
             )
 
-        # print(jax.make_jaxpr(model(points).simulate)(key0))
         jit_model = jax.jit(model(points).simulate)
 
         tr = jit_model(key0)
@@ -537,7 +536,7 @@ def test_map():
     def plus5(x):
         return x + 5.0
 
-    noisy_plus5 = noisy(10).map(plus5)
+    noisy_plus5 = noisy(10.0).map(plus5)
     tr = jax.vmap(noisy_plus5.simulate)(jax.random.split(key0, 3))
     assert jnp.allclose(tr["retval"], jnp.array([15.0111885, 15.005781, 15.008535]))
 
@@ -589,6 +588,46 @@ def test_repeat_of_repeat():
                 [10.956121, 11.274088, 10.94439, 10.894012],
                 [11.076275, 11.013761, 11.081145, 10.860387],
                 [11.015622, 11.002483, 10.953617, 10.820805],
+            ]
+        ),
+    )
+
+
+def test_shaped_distribution():
+    @Gen
+    def f(x):
+        lows = x + jnp.arange(4.0)
+        highs = lows + 1
+        y = Uniform(lows, highs) @ "y"
+        print(f"y {y}")
+        return y
+
+    tr = jax.jit(f(2.0).simulate)(key0)
+    assert jnp.allclose(
+        tr["retval"], jnp.array([2.9653215, 3.225159, 4.63303, 5.296382])
+    )
+    print("a done")
+    tr = jax.jit(f(2.0).repeat(3).simulate)(key0)
+    assert jnp.allclose(
+        tr["retval"],
+        jnp.array(
+            [
+                [2.8321762, 3.5617104, 4.3968754, 5.8156433],
+                [2.356292, 3.640267, 4.5045667, 5.450263],
+                [2.544363, 3.2582088, 4.394433, 5.1704683],
+            ]
+        ),
+    )
+    print("b done")
+    tr = f.vmap()(jnp.arange(2.0, 5.0)).simulate(key0)
+    print(tr)
+    assert jnp.allclose(
+        tr["retval"],
+        jnp.array(
+            [
+                [2.8321762, 3.5617104, 4.3968754, 5.8156433],
+                [3.356292, 4.640267, 5.5045667, 6.450263],
+                [4.544363, 5.2582088, 6.394433, 7.1704683],
             ]
         ),
     )
@@ -690,9 +729,11 @@ def test_vmap_of_vmap():
 
     tr = (
         model.vmap(in_axes=(0, None))
-        # .vmap(in_axes=(None, 0))
-        (jnp.arange(10.0, 15.0), jnp.arange(0.0, 1.6, 0.2)).simulate(key0)
+        # .vmap(in_axes=(None, 0))(jnp.arange(10.0, 15.0), jnp.arange(0.0, 1.6, 0.2))
+        .simulate(key0)
     )
+    print(tr)
+    assert False
     assert jnp.allclose(
         tr["retval"],
         jnp.array(
@@ -741,7 +782,6 @@ def test_assess_vmap1():
         return Normal(a, 0.01) @ "x"
 
     w, retval = p.vmap()(jnp.arange(5.0)).assess({"x": jnp.arange(5.0) + 0.2})
-    print(retval)
     assert w == -981.5693
 
 
@@ -756,7 +796,6 @@ def test_assess_vmap():
     w, retval = model.assess(
         {"x": jnp.arange(5.0) + 0.1, "y": 10.0 + jnp.arange(5.0) + 0.2}
     )
-    print(retval)
     assert w == -9.314385
 
 
@@ -764,7 +803,7 @@ def test_bernoulli():
     @Gen
     def p():
         b = Bernoulli(probs=0.01) @ "b"
-        c = Bernoulli(logits=-1) @ "c"
+        c = Bernoulli(logits=-1.0) @ "c"
         return b, c
 
     tr = p().simulate(key0)
@@ -819,7 +858,6 @@ def test_repeat_importance():
     mr_imp = jax.jit(mr.importance)
     values = jnp.arange(4) / 10.0
     tr, w = mr_imp(key0, {"a": values})
-    print(tr)
     assert jnp.allclose(tr["subtraces"]["a"]["retval"], values)
     assert w == -141.46541
     assert w == jnp.sum(tr["subtraces"]["a"]["w"])

@@ -31,26 +31,21 @@ class Distribution(mg.GenPrimitive):
                 return self.tfd_ctor(*arg_tuple[1:]).log_prob(arg_tuple[0])
 
     def abstract(self, *args, **kwargs):
-        print(f"distro {self.name} {self.dtype} s1 {args[0].shape} s2 {args[1].shape}")
-        return jax.core.ShapedArray(
-            args[0].shape,
-            jnp.dtype("float32") if kwargs["op"] == "Score" else self.dtype,
+        return jax.core.get_aval(
+            jax.eval_shape(lambda args: self.concrete(*args, **kwargs), args)
         )
 
     def concrete(self, *args, **kwargs):
-        print(f"concrete {args} {kwargs}")
-        axes = kwargs.get("axes")
+        axeses = kwargs.get("axes")
         op = kwargs["op"]
-        if axes:
-            mapper = functools.reduce(
+        if axeses:
+            return functools.reduce(
                 lambda f, axes: jax.vmap(f, in_axes=axes),
-                axes,
+                axeses,
                 lambda *args: self.operation(args, op),
-            )
-            return mapper(*args)
+            )(*args)
         else:
-            retval = self.operation(args, op)
-        return retval
+            return self.operation(args, op)
 
     def simulate_p(
         self,
