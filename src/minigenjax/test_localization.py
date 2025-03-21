@@ -88,7 +88,41 @@ def test_localization():
         jnp.array([-1.0, -1.0, -jnp.pi]), jnp.array([1.0, 1.0, jnp.pi])
     )
 
+    key, sub_key = jax.random.split(key)
+    some_pose = whole_map_prior.simulate(key)["retval"]
+
     sensor_model = sensor_model_one.vmap(in_axes=(None, 0, None))
+
+    key, sub_key = jax.random.split(key)
+    tr = sensor_model(some_pose, sensor_angles, sensor_noise).simulate(sub_key)
+    assert jnp.allclose(
+        tr["retval"],
+        jnp.array(
+            [
+                0.67065454,
+                0.581487,
+                0.8832029,
+                1.3153447,
+                1.072247,
+                1.0493912,
+                1.3886665,
+                1.5973471,
+                1.4577864,
+                1.5266284,
+                1.4897541,
+                1.6672342,
+                1.1514298,
+                0.7201601,
+                0.89109415,
+                0.9212124,
+                0.88611394,
+                0.786982,
+                0.6631653,
+                0.48975345,
+                0.70259863,
+            ]
+        ),
+    )
 
     def readings_at_pose(pose):
         return jax.vmap(

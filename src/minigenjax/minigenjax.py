@@ -1,4 +1,5 @@
 # %%
+from collections import namedtuple
 from typing import Any, Callable, Sequence
 from jax._src.core import ClosedJaxpr as ClosedJaxpr
 import jax
@@ -27,6 +28,9 @@ flatten_fun_nokwargs: Callable[[jx.linear_util.WrappedFun, Any], WrappedFunWithA
 
 class MissingConstraint(Exception):
     pass
+
+
+MetaJaxpr = namedtuple("MetaJaxpr", ["jaxpr", "in_tree", "out_tree", "flat_args"])
 
 
 class GenPrimitive(jx.core.Primitive):
@@ -71,6 +75,9 @@ class GenPrimitive(jx.core.Primitive):
             return v.update(shape=(n,) + v.shape)
 
         return jax.tree.map(inflate_one, v)
+
+    def unflatten(self, flat_args):
+        raise NotImplementedError(f"unflatten: {self}")
 
 
 InAxesT = int | Sequence[Any] | None
@@ -118,14 +125,16 @@ class GFI[R](GenPrimitive):
         raise NotImplementedError(f"get_structure: {self}")
 
     @staticmethod
-    def make_jaxpr(f, arg_tuple):
+    def make_jaxpr(f, arg_tuple) -> MetaJaxpr:
         flat_args, in_tree = jax.tree.flatten(arg_tuple)
-        flat_f, out_tree = flatten_fun_nokwargs(jx.linear_util.wrap_init(f), in_tree)
+        flat_f, out_tree_f = flatten_fun_nokwargs(jx.linear_util.wrap_init(f), in_tree)
         jaxpr, shape = jax.make_jaxpr(flat_f.call_wrapped, return_shape=True)(
             *flat_args
         )
-        structure = out_tree()
-        return jaxpr, flat_args, structure
+        out_tree = out_tree_f()
+        return MetaJaxpr(
+            jaxpr=jaxpr, in_tree=in_tree, out_tree=out_tree, flat_args=flat_args
+        )
 
 
 GenSymT = Callable[[jax.core.AbstractValue], jx.core.Var]
@@ -150,10 +159,10 @@ class GF[R](GFI[R]):
         self.wf = jx.linear_util.wrap_init(f)
         self.f = f
         self.args = args
-        self.jaxpr, self.flat_args, self.structure = self.make_jaxpr(self.f, self.args)
-        self.multiple_results = self.structure.num_leaves > 1
+        self.mj = self.make_jaxpr(self.f, self.args)
+        self.multiple_results = self.mj.out_tree.num_leaves > 1
 
-        a_vals = [ov.aval for ov in self.jaxpr.jaxpr.outvars]
+        a_vals = [ov.aval for ov in self.mj.jaxpr.jaxpr.outvars]
         if a_vals:
             self.abstract_value = a_vals if self.multiple_results else a_vals[0]
         else:
@@ -170,28 +179,31 @@ class GF[R](GFI[R]):
         constraint: Constraint,
     ) -> dict:
         return Simulate(key, address, constraint).run(
-            self.jaxpr, arg_tuple, self.structure
+            self.mj.jaxpr, arg_tuple, self.mj.out_tree
         )
 
     def assess_p(
         self, arg_tuple: tuple, constraint: Constraint, address
     ) -> tuple[Float, R]:
         a = Assess[R](address, constraint)
-        retval = a.run(self.jaxpr, arg_tuple, self.structure)
+        retval = a.run(self.mj.jaxpr, arg_tuple, self.mj.out_tree)
         return a.score, retval
 
     def __matmul__(self, address: str):
-        r = self.bind(*self.flat_args, at=address)
-        return jax.tree.unflatten(self.structure, r if self.multiple_results else [r])
+        r = self.bind(*self.mj.flat_args, at=address)
+        return jax.tree.unflatten(self.mj.out_tree, r if self.multiple_results else [r])
 
     def get_args(self) -> tuple:
         return self.args
 
     def get_jaxpr(self) -> jx.core.ClosedJaxpr:
-        return self.jaxpr
+        return self.mj.jaxpr
 
     def get_structure(self) -> jax.tree_util.PyTreeDef:
-        return self.structure
+        return self.mj.out_tree
+
+    def unflatten(self, flat_args) -> jax.tree_util.PyTreeDef:
+        return jax.tree.unflatten(self.mj.in_tree, flat_args)
 
 
 class Transformation[R]:
@@ -341,7 +353,10 @@ class Simulate(Transformation[dict]):
             at = bind_params["at"]
             addr = self.address + (at,)
             ans = eqn.primitive.simulate_p(
-                self.get_sub_key(), params, addr, self.get_sub_constraint(at)
+                self.get_sub_key(),
+                eqn.primitive.unflatten(params),
+                addr,
+                self.get_sub_constraint(at),
             )
             return self.record(ans, at)
 
@@ -461,6 +476,9 @@ class ScanGF[R](GFI[tuple[R, Any]]):
     def get_args(self):
         return self.gfi.get_args()
 
+    def unflatten(self, flat_args):
+        return self.gfi.unflatten(flat_args)
+
 
 class RepeatGF[R](GFI[R]):
     SUB_TRACE = "__repeat"
@@ -470,11 +488,9 @@ class RepeatGF[R](GFI[R]):
         self.gfi = gfi
         self.n = n
         self.multiple_results = self.gfi.multiple_results
-        # TODO: get this from self.make_jaxpr below
-        self.flat_args, self.in_tree = jax.tree.flatten(self.get_args())
 
         # TODO: try to reuse self.__matmul__ here, if possible
-        self.jaxpr, self.flat_args, self.structure = self.make_jaxpr(
+        self.mj = self.make_jaxpr(
             lambda *args: self.bind(
                 *args, at=RepeatGF.SUB_TRACE, n=self.n, inner=self.gfi.get_jaxpr()
             ),
@@ -497,7 +513,7 @@ class RepeatGF[R](GFI[R]):
         return jax.vmap(repeat_inner, in_axes=(0, 0, None))(
             jax.random.split(key, self.n),
             constraint,
-            jax.tree.unflatten(self.in_tree, arg_tuple),
+            jax.tree.unflatten(self.mj.in_tree, arg_tuple),
         )
 
     def assess_p(
@@ -509,7 +525,7 @@ class RepeatGF[R](GFI[R]):
             return a.score, retval
 
         score, retval = jax.vmap(vmap_inner, in_axes=(0, None))(
-            constraint, jax.tree.unflatten(self.in_tree, arg_tuple)
+            constraint, jax.tree.unflatten(self.mj.in_tree, arg_tuple)
         )
         return jnp.sum(score), retval
 
@@ -519,10 +535,13 @@ class RepeatGF[R](GFI[R]):
         )
 
     def get_jaxpr(self) -> jx.core.ClosedJaxpr:
-        return self.jaxpr
+        return self.mj.jaxpr
+
+    def unflatten(self, flat_args):
+        return jax.tree.unflatten(self.mj.in_tree, flat_args)
 
     def get_structure(self):
-        return self.structure
+        return self.mj.out_tree
 
     def get_args(self) -> tuple:
         return self.gfi.get_args()
@@ -596,7 +615,7 @@ class VmapGF[R](GFI[R]):
         return jax.vmap(vmap_inner, in_axes=(0, 0, self.in_axes))(
             jax.random.split(key, self.n),
             constraint,
-            jax.tree.unflatten(self.in_tree, arg_tuple),
+            arg_tuple,
         )
 
     def assess_p(
@@ -617,6 +636,9 @@ class VmapGF[R](GFI[R]):
             *self.flat_args, at=address, in_axes=self.in_axes, inner=self.inner_jaxpr
         )
 
+    def unflatten(self, flat_args):
+        return jax.tree.unflatten(self.in_tree, flat_args)
+
     def get_args(self) -> tuple:
         return self.arg_tuple
 
@@ -628,7 +650,7 @@ class MapGF[R, S](GFI[S]):
         self.f = f
 
         inner = self.gfi.get_jaxpr()
-        self.jaxpr, self.flat_args, self.structure = self.make_jaxpr(
+        self.mj = self.make_jaxpr(
             lambda *args: self.f(
                 jax.tree.unflatten(
                     self.gfi.get_structure(),
@@ -651,20 +673,23 @@ class MapGF[R, S](GFI[S]):
         constraint: Constraint,
     ) -> dict:
         return Simulate(key, address, constraint).run(
-            self.jaxpr, arg_tuple, self.structure
+            self.mj.jaxpr, arg_tuple, self.mj.out_tree
         )
 
     def __matmul__(self, address: str) -> S:
         # TODO (Q): can we declare multiple returns and drop the brackets?
         return jax.tree.unflatten(
-            self.structure, [self.bind(*self.flat_args, at=address)]
+            self.mj.out_tree, [self.bind(*self.mj.flat_args, at=address)]
         )
 
     def get_args(self) -> tuple:
         return self.gfi.get_args()
 
+    def unflatten(self, flat_args) -> tuple:
+        return self.gfi.unflatten(flat_args)
+
     def get_jaxpr(self) -> jx.core.ClosedJaxpr:
-        return self.jaxpr
+        return self.mj.jaxpr
 
 
 def to_constraint(trace: dict) -> Constraint:

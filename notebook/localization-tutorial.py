@@ -1667,7 +1667,7 @@ def path_model(motion_settings):
         s = step_model(motion_settings, start, control) @ "step"
         return s, s
 
-    return mg.Scan(step)(robot_inputs["start"], robot_inputs["controls"]) @ "steps"
+    return step(robot_inputs["start"], robot_inputs["controls"]).scan() @ "steps"
 
 
 # %% [markdown]
