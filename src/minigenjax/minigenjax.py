@@ -463,13 +463,25 @@ class Simulate(Transformation[dict]):
                 address = self.address
                 sub_address = None
 
+            num_carry = bind_params["num_carry"]
+
             def step(carry_key, s):
+                print(f"ck in {carry_key}")
                 carry, key = carry_key
                 key, k1 = KeySplit.bind(key, a="scan_step")
                 v = Simulate(k1, address, self.constraint).run(inner, (carry, s))
-                return ((v["retval"][0], key), v)
+                print(f'v.retval = {v['retval']}')
+                # this computation below is bogus. We need a way to store the argument
+                # structure which can be retrieved here the arguments can be packed and
+                # unpacked correctly.
+                return ((tuple(jax.tree.flatten(v["retval"][:num_carry])[0]), key), v)
 
-            ans = jax.lax.scan(step, (params[0], self.get_sub_key()), params[1])
+            # Where we left off: we need the in_tree into which to decompose
+            # the parameters
+
+            ans = jax.lax.scan(
+                step, (params[:num_carry], self.get_sub_key()), params[num_carry:]
+            )
             if sub_address:
                 self.trace[sub_address] = ans[1]["subtraces"][sub_address]
 

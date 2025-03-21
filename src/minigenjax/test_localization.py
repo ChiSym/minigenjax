@@ -1,4 +1,3 @@
-import pytest
 from minigenjax import *
 import jax.numpy as jnp
 from jaxtyping import Array
@@ -99,58 +98,27 @@ def test_localization():
     @Gen
     def joint_model():
         pose = whole_map_prior @ "pose"
-        sensor = sensor_model(pose, sensor_angles, sensor_noise) @ "sensor"
+        _ = sensor_model(pose, sensor_angles, sensor_noise) @ "sensor"
 
     key, sub_key = jax.random.split(key)
     target = joint_model().simulate(sub_key)
     target_pose = target["subtraces"]["pose"]["retval"]
     target_readings = target["subtraces"]["sensor"]["subtraces"]["distance"]["retval"]
 
-    print(f"chm {to_constraint(target)}")
-    print(f"target_pose {target_pose}")
-    print(f"target_readings {target_readings}")
-
     key, sub_key = jax.random.split(key)
-    poses = jax.vmap(whole_map_prior.simulate)(jax.random.split(sub_key, 10))
-    print(f'poses {poses["retval"]}')
-
-    print(jax.make_jaxpr(joint_model().assess)(to_constraint(target)))
+    poses = jax.vmap(whole_map_prior.simulate)(jax.random.split(sub_key, 50000))[
+        "retval"
+    ]
 
     def trial(pose, target_readings):
         cm = {
             "pose": {"p_array": pose.as_array()},
             "sensor": {"distance": target_readings},
         }
-        print(cm)
-        return joint_model().assess(cm)
+        return joint_model().assess(cm)[0]
 
-    j_trial = jax.jit(trial)
-
-    print("t1", j_trial(Pose(jnp.array([0.0, 0.0]), 0.0), target_readings))
-    print("t2", j_trial(Pose(jnp.array([0.5, 0.5]), 0.2), target_readings))
-    print("t3", j_trial(Pose(jnp.array([0.12, 0.9]), -1.98), target_readings))
-    print(poses["retval"])
-    # print(jax.vmap(trial)(poses["retval"]))
-    print("tp0", trial(poses["retval"][0], target_readings))
-    print("tp1", trial(poses["retval"][1], target_readings))
-    print(
-        "tpx",
-        jax.vmap(lambda pose: j_trial(pose, target_readings))(poses["retval"][:2]),
-    )
-    return
-
-    scores = jax.vmap(trial)(poses["retval"])
-    print(scores)
-
-    # target_pose = whole_map_prior.simulate(sub_key)["retval"]
-    # target_readings = readings_at_pose(target_pose)
-
-    # observations = {"pose": {"p_array": target_pose.as_array()}, "sensor": {"distance": target_readings}}
-    # print(f'observations {observations}')
-    # key, sub_key = jax.random.split(key)
-    # tr = joint_model().simulate(sub_key)
-    # print(to_constraint(tr))
-    # w, retval = joint_model().assess(observations)
-    # print(w)
-    # print(retval)
-    # w, retval = joint_model().assess()
+    scores = jax.vmap(trial, in_axes=(0, None))(poses, target_readings)
+    key, sub_key = jax.random.split(key)
+    winners = jax.vmap(Categorical(logits=scores).sample)(jax.random.split(sub_key, 10))
+    winning_poses = jax.tree.map(lambda v: v[winners], poses)
+    print(target_pose, winning_poses)

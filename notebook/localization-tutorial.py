@@ -883,7 +883,7 @@ def two_room_prior():
 
 
 def two_room_cm_builder(pose):
-    return {"f": pose.p[1] < 10, "p": pose.as_array()}
+    return {"f": jnp.array(pose.p[1] < 10, int), "p": pose.as_array()}
 
 
 # %%
@@ -1165,8 +1165,10 @@ def grid_approximation_handler(widget, k, readings):
     grid_poses = make_poses_grid(world["bounding_box"], N_grid)
     posterior_densities = jax.vmap(jitted_posterior)(grid_poses)
 
+    # TODO(colin): there is a more efficient way of doing this; sample all the
+    # indices and then project the grid_poses down
     def grid_sample_one(k):
-        return grid_poses[genjax.categorical.propose(k, (posterior_densities,))[2]]
+        return grid_poses[mg.Categorical(logits=posterior_densities).sample(k)]
 
     grid_samples = jax.vmap(grid_sample_one)(jax.random.split(k, N_samples))
     widget.state.update(
@@ -1214,7 +1216,7 @@ def importance_resampling_handler(widget, k, readings):
         k1, k2 = jax.random.split(k)
         presamples = jax.vmap(random_pose)(jax.random.split(k1, N_presamples))
         posterior_densities = jax.vmap(jitted_posterior)(presamples)
-        return presamples[genjax.categorical.propose(k2, (posterior_densities,))[2]]
+        return presamples[mg.Categorical(logits=posterior_densities).sample(k2)]
 
     grid_samples = jax.vmap(importance_resample_one)(jax.random.split(k, N_samples))
     widget.state.update(
@@ -1263,10 +1265,7 @@ def MCMC_handler(widget, k, readings):
         new_p_hd = jax.random.uniform(k1, shape=(3,), minval=mins, maxval=maxs)
         new_pose = Pose(new_p_hd[0:2], new_p_hd[2])
         new_posterior = jitted_posterior(new_pose)
-        accept = (
-            jnp.log(genjax.uniform.propose(k2, ())[2])
-            <= new_posterior - posterior_density
-        )
+        accept = jnp.log(mg.Uniform().sample(k2)) <= new_posterior - posterior_density
         return (
             jax.tree.map(
                 lambda x, y: jnp.where(accept, x, y),
@@ -1313,10 +1312,10 @@ camera_widget(
 
 
 # %%
-@pz.pytree_dataclass
-class Control(genjax.PythonicPytree):
-    ds: FloatArray
-    dhd: FloatArray
+@mg.pytree
+class Control:
+    ds: Array
+    dhd: Array
 
 
 def load_robot_program(file_name):
@@ -1435,7 +1434,7 @@ def update_unphysical_path(widget, _):
 
 # %%
 @jax.jit
-def physical_step(p1: FloatArray, p2: FloatArray, hd):
+def physical_step(p1: Array, p2: Array, hd):
     """
     Computes a physical step considering wall collisions and bounces.
 
@@ -1545,15 +1544,15 @@ def update_physical_path(widget, _):
 #
 # The following models attempting to step (constrained by the walls) towards a point with some uncertainty about it.
 # %%
-@genjax.gen
+@mg.Gen
 def step_model(motion_settings, start, control):
     p = (
-        genjax.mv_normal_diag(
+        mg.MvNormalDiag(
             start.p + control.ds * start.dp(), motion_settings["p_noise"] * jnp.ones(2)
         )
         @ "p"
     )
-    hd = genjax.normal(start.hd + control.dhd, motion_settings["hd_noise"]) @ "hd"
+    hd = mg.Normal(start.hd + control.dhd, motion_settings["hd_noise"]) @ "hd"
     return physical_step(start.p, p, hd)
 
 
@@ -1593,9 +1592,10 @@ def update_confidence_circle(widget, _):
     )
 
     k1, k2 = jax.random.split(jax.random.wrap_key_data(widget.state.k))
-    samples = jax.vmap(step_model.propose, in_axes=(0, None))(
+    samples = jax.vmap(
+        step_model(model_motion_settings, tilted_start, Control(ds, dhd)).propose
+    )(
         jax.random.split(k1, N_samples),
-        (model_motion_settings, tilted_start, Control(ds, dhd)),
     )[2]
     widget.state.update({"k": jax.random.key_data(k2), "samples": samples.as_dict()})
 
@@ -1632,14 +1632,13 @@ def update_confidence_circle(widget, _):
             "control": {"ds": 0.0, "dhd": 0.0},
             "k": jax.random.key_data(k1),
             "samples": (
-                jax.vmap(step_model.propose, in_axes=(0, None))(
-                    jax.random.split(k2, N_samples),
-                    (
+                jax.vmap(
+                    step_model(
                         model_motion_settings,
                         robot_inputs["start"],
                         robot_inputs["controls"][0],
-                    ),
-                )[2].as_dict()
+                    ).propose,
+                )(jax.random.split(k2, N_samples))[2].as_dict()
             ),
         },
         sync={"k"},
@@ -1661,14 +1660,14 @@ def update_confidence_circle(widget, _):
 
 
 # %%
-@genjax.gen
+@mg.Gen
 def path_model(motion_settings):
-    return (
-        step_model.partial_apply(motion_settings)
-        .map(diag)
-        .scan()(robot_inputs["start"], robot_inputs["controls"])
-        @ "steps"
-    )
+    @mg.Gen
+    def step(start, control):
+        s = step_model(motion_settings, start, control) @ "step"
+        return s, s
+
+    return mg.Scan(step)(robot_inputs["start"], robot_inputs["controls"]) @ "steps"
 
 
 # %% [markdown]
@@ -1676,7 +1675,7 @@ def path_model(motion_settings):
 
 # %%
 key, sub_key = jax.random.split(key)
-path_model.propose(sub_key, (model_motion_settings,))[2]
+path_model(model_motion_settings).propose(sub_key)  # [2]
 
 
 # %% [markdown]
