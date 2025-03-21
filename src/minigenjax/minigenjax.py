@@ -297,25 +297,6 @@ class Assess[R](Transformation[R]):
         self.score = jnp.array(0.0)
 
     def handle_eqn(self, eqn: jx.core.JaxprEqn, params, bind_params):
-        if isinstance(eqn.primitive, VmapGF):
-            at = bind_params["at"]
-
-            def vmap_inner(constraint, params):
-                a = Assess(self.address + (at,), constraint)
-                retval = a.run(bind_params["inner"], params)
-                return a.score, retval
-
-            if at != VmapGF.SUB_TRACE:
-                cons = self.get_sub_constraint(at, required=True)
-            else:
-                cons = self.constraint
-
-            score, ans = jax.vmap(vmap_inner, in_axes=(0, eqn.primitive.in_axes))(
-                cons, jax.tree.unflatten(eqn.primitive.in_tree, params)
-            )
-            self.score += jnp.sum(score)
-            return ans
-
         if isinstance(eqn.primitive, GenPrimitive):
             at = bind_params["at"]
             addr = self.address + (at,)
@@ -529,8 +510,6 @@ class RepeatGF[R](GFI[R]):
 
 
 class VmapGF[R](GFI[R]):
-    SUB_TRACE = "__vmap"
-
     def __init__(self, g: Gen, arg_tuple: tuple, in_axes: InAxesT):
         super().__init__(f"Vmap[{g.f.__name__}]")
         if in_axes is None or in_axes == ():
@@ -561,11 +540,6 @@ class VmapGF[R](GFI[R]):
             self.inner_shape,
         )
         self.multiple_results = isinstance(self.inner_shape, tuple)
-        # self.jaxpr = jax.make_jaxpr(
-        #     lambda *args: self.bind(
-        #         *args, in_axes=self.in_axes, at=VmapGF.SUB_TRACE, inner=self.inner_jaxpr
-        #     ),
-        # )(*self.flat_args)
 
     def get_reduced_avals(self, arg_tuple):
         # Produce an abstract arg tuple in which the shape of the
@@ -609,9 +583,16 @@ class VmapGF[R](GFI[R]):
     def assess_p(
         self, arg_tuple: tuple, constraint: Constraint, address: tuple[str, ...]
     ) -> Float:
-        a = Assess(address, constraint)
-        retval = a.run(self.inner_jaxpr, arg_tuple)
-        return a.score, retval
+        def vmap_inner(constraint, params):
+            a = Assess(address, constraint)
+            retval = a.run(self.inner_jaxpr, params)
+            return a.score, retval
+
+        score, retval = jax.vmap(vmap_inner, in_axes=(0, self.in_axes))(
+            constraint, jax.tree.unflatten(self.in_tree, arg_tuple)
+        )
+        return jnp.sum(score), retval
+
 
     def __matmul__(self, address: str) -> R:
         return self.bind(
