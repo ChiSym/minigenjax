@@ -15,6 +15,9 @@ class Distribution(mg.GenPrimitive):
         self.dtype = dtype
         mlir.register_lowering(self, mlir.lower_fun(self.impl, False))
 
+    def unflatten(self, flat_args):
+        return flat_args
+
     def batch(self, vector_args, batch_axes, **kwargs):
         if axes := kwargs.pop("axes", None):
             axes = axes + [batch_axes]
