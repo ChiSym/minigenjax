@@ -5,7 +5,7 @@ import jax
 import jax.tree
 import jax.api_util
 import jax.numpy as jnp
-from jax.interpreters import batching, mlir
+from jax.interpreters import batching
 from .key import KeySplit
 import jax.extend as jx
 import jax.core
@@ -105,6 +105,9 @@ class GFI[R](GenPrimitive):
     def map[S](self, f: Callable[[R], S]) -> "MapGF[R,S]":
         return MapGF(self, f)
 
+    def scan(self) -> "ScanGF":
+        return ScanGF(self)
+
     def repeat(self, n: int) -> "RepeatGF[R]":
         return RepeatGF(self, n)
 
@@ -118,7 +121,6 @@ class GFI[R](GenPrimitive):
     def make_jaxpr(f, arg_tuple):
         flat_args, in_tree = jax.tree.flatten(arg_tuple)
         flat_f, out_tree = flatten_fun_nokwargs(jx.linear_util.wrap_init(f), in_tree)
-        # TODO: consider whether we need shape here
         jaxpr, shape = jax.make_jaxpr(flat_f.call_wrapped, return_shape=True)(
             *flat_args
         )
@@ -374,40 +376,6 @@ class Simulate(Transformation[dict]):
             # but cond_p as a primitive requires "multiple results."
             return ans["retval"]
 
-        if eqn.primitive is jax.lax.scan_p:
-            inner = bind_params["jaxpr"]
-
-            if at := self.address_from_branch(inner):
-                address = self.address + (at,)
-                sub_address = at
-            else:
-                address = self.address
-                sub_address = None
-
-            num_carry = bind_params['num_carry']
-
-            def step(carry_key, s):
-                print(f'ck in {carry_key}')
-                carry, key = carry_key
-                key, k1 = KeySplit.bind(key, a="scan_step")
-                v = Simulate(k1, address, self.constraint).run(inner, (carry, s))
-                print(f'v.retval = {v['retval']}')
-                # this computation below is bogus. We need a way to store the argument
-                # structure which can be retrieved here the arguments can be packed and
-                # unpacked correctly.
-                return ((tuple(jax.tree.flatten(v["retval"][:num_carry])[0]), key), v)
-
-            # Where we left off: we need the in_tree into which to decompose
-            # the parameters
-
-            ans = jax.lax.scan(step, (params[:num_carry], self.get_sub_key()), params[num_carry:])
-            if sub_address:
-                self.trace[sub_address] = ans[1]["subtraces"][sub_address]
-
-            self.w += jnp.sum(ans[1].get("w", 0))
-            # we extended the carry with the key; now drop it
-            return (ans[0][0], ans[1]["retval"][1])
-
         return super().handle_eqn(eqn, params, bind_params)
 
     def construct_retval(self, retval):
@@ -456,6 +424,44 @@ def Scan(gf: Gen):
     return ctor
 
 
+class ScanGF[R](GFI[tuple[R, Any]]):
+    def __init__(self, gfi: GFI[R]):
+        super().__init__(f"Scan[{gfi.name}]")
+        self.gfi = gfi
+        self.multiple_results = True
+        self.flat_args, self.in_tree = jax.tree.flatten(self.get_args())
+
+    def abstract(self, *args, **kwargs):
+        return self.gfi.abstract(*args, **kwargs)
+
+    def simulate_p(
+        self,
+        key: Array,
+        arg_tuple: tuple,
+        address: tuple[str, ...],
+        constraint: Constraint,
+    ) -> dict:
+        def step(carry_key, s):
+            carry, key = carry_key
+            key, k1 = KeySplit.bind(key, a="scan_step")
+            v = Simulate(k1, address, constraint).run(
+                self.gfi.get_jaxpr(), (carry, s), self.gfi.get_structure()
+            )
+            return (v["retval"][0], key), v
+
+        ans = jax.lax.scan(step, (arg_tuple[0], key), arg_tuple[1])
+        # Fix the return values to report the things an ordinary use of
+        # scan would produce.
+        ans[1]["retval"] = (ans[0][0], ans[1]["retval"][0])
+        return ans[1]
+
+    def __matmul__(self, address: str) -> tuple[R, Any]:
+        return self.bind(*self.gfi.get_args(), at=address, inner=self.gfi.get_jaxpr())
+
+    def get_args(self):
+        return self.gfi.get_args()
+
+
 class RepeatGF[R](GFI[R]):
     SUB_TRACE = "__repeat"
 
@@ -493,6 +499,19 @@ class RepeatGF[R](GFI[R]):
             constraint,
             jax.tree.unflatten(self.in_tree, arg_tuple),
         )
+
+    def assess_p(
+        self, arg_tuple: tuple, constraint: Constraint, address: tuple[str, ...]
+    ) -> Float:
+        def vmap_inner(constraint, params):
+            a = Assess(address, constraint)
+            retval = a.run(self.gfi.get_jaxpr(), params)
+            return a.score, retval
+
+        score, retval = jax.vmap(vmap_inner, in_axes=(0, None))(
+            constraint, jax.tree.unflatten(self.in_tree, arg_tuple)
+        )
+        return jnp.sum(score), retval
 
     def __matmul__(self, address: str) -> R:
         return self.bind(
@@ -593,7 +612,6 @@ class VmapGF[R](GFI[R]):
         )
         return jnp.sum(score), retval
 
-
     def __matmul__(self, address: str) -> R:
         return self.bind(
             *self.flat_args, at=address, in_axes=self.in_axes, inner=self.inner_jaxpr
@@ -602,8 +620,6 @@ class VmapGF[R](GFI[R]):
     def get_args(self) -> tuple:
         return self.arg_tuple
 
-    def get_jaxpr(self) -> jx.core.ClosedJaxpr:
-        return self.jaxpr
 
 class MapGF[R, S](GFI[S]):
     def __init__(self, gfi: GFI[R], f: Callable[[R], S]):
@@ -669,3 +685,6 @@ def to_score(trace: dict) -> Float:
 
 def to_weight(trace: dict) -> Float:
     return trace_sum(trace, "w")
+
+
+# %%
