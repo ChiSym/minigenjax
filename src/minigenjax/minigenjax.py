@@ -329,24 +329,6 @@ class Assess[R](Transformation[R]):
             )
             self.score += jnp.sum(score)
             return ans
-            # can we avoid this? maybe by wrapping constraint dict when we use
-            # this fake label?
-
-            transformed, shape = self.transform_inner(
-                bind_params["inner"], eqn.primitive.reduced_avals, at, cons
-            )
-            new_params = bind_params | {"inner": transformed}
-            # TODO: the below is sus. Aren't the params already flat here?
-            flat_params, _ = jax.tree.flatten(params)
-            flat_constraint, _ = jax.tree.flatten(cons)
-            score, ans = jax.tree.unflatten(
-                jax.tree.structure(shape),
-                eqn.primitive.Assess(
-                    eqn.primitive, shape, len(flat_constraint), True
-                ).bind(*flat_params, **new_params),
-            )
-            self.score += jnp.sum(score)
-            return ans
 
         if isinstance(eqn.primitive, GenPrimitive):
             at = bind_params["at"]
@@ -386,34 +368,6 @@ class Simulate(Transformation[dict]):
         return sub_trace["retval"]
 
     def handle_eqn(self, eqn: jx.core.JaxprEqn, params, bind_params):
-        if isinstance(eqn.primitive, RepeatGF):
-            at = bind_params["at"]
-
-            def repeat_inner(key, constraint, params):
-                s = Simulate(key, self.address + (at,), constraint)
-                return s.run(bind_params["inner"], params)
-
-            ans = jax.vmap(repeat_inner, in_axes=(0, 0, None))(
-                jax.random.split(self.get_sub_key(), eqn.primitive.n),
-                self.get_sub_constraint(at),
-                jax.tree.unflatten(eqn.primitive.in_tree, params),
-            )
-            return self.record(ans, at)
-
-        if isinstance(eqn.primitive, VmapGF):
-            at = bind_params["at"]
-
-            def vmap_inner(key, constraint, params):
-                s = Simulate(key, self.address + (at,), constraint)
-                return s.run(bind_params["inner"], params)
-
-            ans = jax.vmap(vmap_inner, in_axes=(0, 0, bind_params["in_axes"]))(
-                jax.random.split(self.get_sub_key(), eqn.primitive.n),
-                self.get_sub_constraint(at),
-                jax.tree.unflatten(eqn.primitive.in_tree, params),
-            )
-            return self.record(ans, at)
-
         if isinstance(eqn.primitive, GenPrimitive):
             at = bind_params["at"]
             addr = self.address + (at,)
@@ -463,10 +417,10 @@ class Simulate(Transformation[dict]):
                 address = self.address
                 sub_address = None
 
-            num_carry = bind_params["num_carry"]
+            num_carry = bind_params['num_carry']
 
             def step(carry_key, s):
-                print(f"ck in {carry_key}")
+                print(f'ck in {carry_key}')
                 carry, key = carry_key
                 key, k1 = KeySplit.bind(key, a="scan_step")
                 v = Simulate(k1, address, self.constraint).run(inner, (carry, s))
@@ -479,9 +433,7 @@ class Simulate(Transformation[dict]):
             # Where we left off: we need the in_tree into which to decompose
             # the parameters
 
-            ans = jax.lax.scan(
-                step, (params[:num_carry], self.get_sub_key()), params[num_carry:]
-            )
+            ans = jax.lax.scan(step, (params[:num_carry], self.get_sub_key()), params[num_carry:])
             if sub_address:
                 self.trace[sub_address] = ans[1]["subtraces"][sub_address]
 
@@ -566,12 +518,15 @@ class RepeatGF[R](GFI[R]):
         address: Address,
         constraint: Constraint,
     ) -> dict:
-        tr = Simulate(key, address, {RepeatGF.SUB_TRACE: constraint}).run(
-            self.jaxpr, arg_tuple, self.structure
-        )["subtraces"][RepeatGF.SUB_TRACE]
-        # if "w" in tr:
-        #     tr["w"] = jnp.sum(tr["w"])
-        return tr
+        def repeat_inner(key, constraint, params):
+            s = Simulate(key, address, constraint)
+            return s.run(self.gfi.get_jaxpr(), params)
+
+        return jax.vmap(repeat_inner, in_axes=(0, 0, None))(
+            jax.random.split(key, self.n),
+            constraint,
+            jax.tree.unflatten(self.in_tree, arg_tuple),
+        )
 
     def __matmul__(self, address: str) -> R:
         return self.bind(
@@ -657,10 +612,15 @@ class VmapGF[R](GFI[R]):
         address: Address,
         constraint: Constraint,
     ) -> dict:
-        tr = Simulate(key, address, {VmapGF.SUB_TRACE: constraint}).run(
-            self.jaxpr, arg_tuple
-        )["subtraces"][VmapGF.SUB_TRACE]
-        return tr
+        def vmap_inner(key, constraint, params):
+            s = Simulate(key, address, constraint)
+            return s.run(self.inner_jaxpr, params)
+
+        return jax.vmap(vmap_inner, in_axes=(0, 0, self.in_axes))(
+            jax.random.split(key, self.n),
+            constraint,
+            jax.tree.unflatten(self.in_tree, arg_tuple),
+        )
 
     def assess_p(
         self, arg_tuple: tuple, constraint: Constraint, address: tuple[str, ...]
