@@ -1,5 +1,6 @@
 import dataclasses
 import jax.tree_util
+import jax.numpy as jnp
 
 
 class IterablePytree:
@@ -11,6 +12,13 @@ class IterablePytree:
 
     def __iter__(self):
         return (self.__getitem__(i) for i in range(self.__len__()))
+
+    def prepend(self, child):
+        """Prepends a scalar element to the front of each leaf in a Pytree."""
+        return jax.tree.map(lambda x: x[jnp.newaxis], child) + self
+
+    def __add__(self, other):
+        return jax.tree.map(lambda a, b: jnp.concatenate([a, b]), self, other)
 
 
 def pytree(cls: type) -> type:

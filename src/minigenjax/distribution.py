@@ -20,7 +20,6 @@ class Distribution(mg.GenPrimitive):
             axes = axes + [batch_axes]
         else:
             axes = [batch_axes]
-        print(f"binding with axes={axes}")
         return self.bind(*vector_args, axes=axes, **kwargs), 0
 
     def operation(self, arg_tuple, op):
