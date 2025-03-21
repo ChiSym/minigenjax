@@ -296,20 +296,6 @@ class Assess[R](Transformation[R]):
         super().__init__(PHANTOM_KEY, address, constraint)
         self.score = jnp.array(0.0)
 
-    def transform_inner(self, jaxpr, in_avals, addr: str, constraint: Constraint):
-        """Apply simulate to jaxpr and return the transformed jaxpr together
-        with its return shape."""
-
-        def inner(in_avals):
-            a = Assess(self.address + (addr,), constraint)
-            retval = a.run(jaxpr, in_avals)
-            return a.score, retval
-
-        return jax.make_jaxpr(
-            inner,
-            return_shape=True,
-        )(in_avals)
-
     def handle_eqn(self, eqn: jx.core.JaxprEqn, params, bind_params):
         if isinstance(eqn.primitive, VmapGF):
             at = bind_params["at"]
@@ -519,8 +505,7 @@ class RepeatGF[R](GFI[R]):
         constraint: Constraint,
     ) -> dict:
         def repeat_inner(key, constraint, params):
-            s = Simulate(key, address, constraint)
-            return s.run(self.gfi.get_jaxpr(), params)
+            return Simulate(key, address, constraint).run(self.gfi.get_jaxpr(), params)
 
         return jax.vmap(repeat_inner, in_axes=(0, 0, None))(
             jax.random.split(key, self.n),
@@ -575,12 +560,12 @@ class VmapGF[R](GFI[R]):
             lambda s: jax.ShapeDtypeStruct((self.n,) + s.shape, s.dtype),
             self.inner_shape,
         )
-        self.multiple_results = isinstance(self.shape, tuple)
-        self.jaxpr = jax.make_jaxpr(
-            lambda *args: self.bind(
-                *args, in_axes=self.in_axes, at=VmapGF.SUB_TRACE, inner=self.inner_jaxpr
-            ),
-        )(*self.flat_args)
+        self.multiple_results = isinstance(self.inner_shape, tuple)
+        # self.jaxpr = jax.make_jaxpr(
+        #     lambda *args: self.bind(
+        #         *args, in_axes=self.in_axes, at=VmapGF.SUB_TRACE, inner=self.inner_jaxpr
+        #     ),
+        # )(*self.flat_args)
 
     def get_reduced_avals(self, arg_tuple):
         # Produce an abstract arg tuple in which the shape of the
@@ -613,8 +598,7 @@ class VmapGF[R](GFI[R]):
         constraint: Constraint,
     ) -> dict:
         def vmap_inner(key, constraint, params):
-            s = Simulate(key, address, constraint)
-            return s.run(self.inner_jaxpr, params)
+            return Simulate(key, address, constraint).run(self.inner_jaxpr, params)
 
         return jax.vmap(vmap_inner, in_axes=(0, 0, self.in_axes))(
             jax.random.split(key, self.n),
@@ -626,7 +610,7 @@ class VmapGF[R](GFI[R]):
         self, arg_tuple: tuple, constraint: Constraint, address: tuple[str, ...]
     ) -> Float:
         a = Assess(address, constraint)
-        retval = a.run(self.jaxpr, arg_tuple)
+        retval = a.run(self.inner_jaxpr, arg_tuple)
         return a.score, retval
 
     def __matmul__(self, address: str) -> R:
@@ -639,40 +623,6 @@ class VmapGF[R](GFI[R]):
 
     def get_jaxpr(self) -> jx.core.ClosedJaxpr:
         return self.jaxpr
-
-    class Simulate(GenPrimitive):
-        def __init__(self, r: "VmapGF", shape: Any):  # TODO: PyTreeDef?
-            super().__init__("Vmap.Simulate")
-            self.r = r
-            self.n = self.r.arg_tuple[self.r.p_index].shape[self.r.an_axis]
-            self.shape = shape
-            self.multiple_results = True
-            mlir.register_lowering(
-                self, mlir.lower_fun(self.impl, self.multiple_results)
-            )
-
-        def abstract(self, *args, **kwargs):
-            return [
-                self.inflate(jax.core.get_aval(s), self.r.n)
-                for s in jax.tree.flatten(self.shape)[0]
-            ]
-
-        def concrete(self, *args, **kwargs):
-            # this is called after the simulate transformation so the key is the first argument
-            j: jx.core.ClosedJaxpr = kwargs["inner"]
-            return jax.vmap(
-                lambda k, arg_tuple: jax.core.eval_jaxpr(
-                    j.jaxpr,
-                    j.consts,
-                    k,
-                    *jax.tree.flatten(arg_tuple)[0],
-                ),
-                in_axes=(0, self.r.in_axes),
-            )(
-                jax.random.split(args[0], self.n),
-                jax.tree.unflatten(self.r.in_tree, args[1:]),
-            )
-
 
 class MapGF[R, S](GFI[S]):
     def __init__(self, gfi: GFI[R], f: Callable[[R], S]):
