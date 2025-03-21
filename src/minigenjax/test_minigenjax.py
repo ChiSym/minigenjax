@@ -405,10 +405,24 @@ def test_scan_model():
 
     @Gen
     def scan_update():
-        return Scan(update)(10.0, jnp.arange(0.1, 0.6, 0.1)) @ "S"
+        return update(10.0, jnp.arange(0.1, 0.6, 0.1)).scan() @ "S"
 
-    tr = scan_update().simulate(key0)
+    tr = update(10.0, jnp.arange(0.1, 0.6, 0.1)).scan().simulate(key0)
+    print(f"final tr {tr}")
     assert jnp.allclose(tr["retval"][0], 11.482168)
+    assert jnp.allclose(
+        tr["retval"][1],
+        jnp.array([10.087484, 10.281618, 10.586483, 10.988654, 11.482168]),
+    )
+    assert jnp.allclose(
+        tr["subtraces"]["drift"]["retval"],
+        jnp.array([0.08748461, 0.19413349, 0.30486485, 0.4021714, 0.49351367]),
+    )
+    assert jnp.allclose(
+        tr["subtraces"]["drift"]["score"],
+        jnp.array([2.903057, 3.514152, 3.5678985, 3.6626565, 3.4758694]),
+    )
+    tr = scan_update().simulate(key0)
     assert jnp.allclose(
         tr["retval"][1],
         jnp.array([10.087484, 10.281618, 10.586483, 10.988654, 11.482168]),
@@ -729,8 +743,8 @@ def test_vmap_of_vmap():
 
     tr = (
         model.vmap(in_axes=(0, None))
-        # .vmap(in_axes=(None, 0))(jnp.arange(10.0, 15.0), jnp.arange(0.0, 1.6, 0.2))
-        .simulate(key0)
+        # .vmap(in_axes=(None, 0))
+        (jnp.arange(10.0, 15.0), jnp.arange(0.0, 1.6, 0.2)).simulate(key0)
     )
     print(tr)
     assert False
@@ -797,6 +811,15 @@ def test_assess_vmap():
         {"x": jnp.arange(5.0) + 0.1, "y": 10.0 + jnp.arange(5.0) + 0.2}
     )
     assert w == -9.314385
+
+
+def test_assess_repeat():
+    @Gen
+    def m(a):
+        return Normal(a, 1.0) @ "x"
+
+    w, _ = m(10.0).repeat(4).assess({"x": 10.0 + 0.1 * jnp.ones(4)})
+    assert w == -3.6957543
 
 
 def test_bernoulli():
