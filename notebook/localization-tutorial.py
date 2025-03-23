@@ -1667,7 +1667,7 @@ def path_model(motion_settings):
         s = step_model(motion_settings, start, control) @ "step"
         return s, s
 
-    return step(robot_inputs["start"], robot_inputs["controls"]).scan() @ "steps"
+    return step.scan()(robot_inputs["start"], robot_inputs["controls"]) @ "steps"
 
 
 # %% [markdown]
@@ -1675,7 +1675,8 @@ def path_model(motion_settings):
 
 # %%
 key, sub_key = jax.random.split(key)
-path_model(model_motion_settings).propose(sub_key)  # [2]
+path_model(model_motion_settings).propose(sub_key)
+# %%
 
 
 # %% [markdown]
@@ -1697,7 +1698,7 @@ def plot_path_with_confidence(path, step):
     )
 
 
-key, sample_key = jax.random.split(key)
+key, sample_key = jax.random.split(key)q
 path = path_model.propose(sample_key, (model_motion_settings,))[2][1]
 Plot.Frames(
     [

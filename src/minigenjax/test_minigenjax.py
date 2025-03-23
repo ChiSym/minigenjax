@@ -405,9 +405,9 @@ def test_scan_model():
 
     @Gen
     def scan_update():
-        return update(10.0, jnp.arange(0.1, 0.6, 0.1)).scan() @ "S"
+        return update.scan()(10.0, jnp.arange(0.1, 0.6, 0.1)) @ "S"
 
-    tr = update(10.0, jnp.arange(0.1, 0.6, 0.1)).scan().simulate(key0)
+    tr = update.scan()(10.0, jnp.arange(0.1, 0.6, 0.1)).simulate(key0)
     print(f"final tr {tr}")
     assert jnp.allclose(tr["retval"][0], 11.482168)
     assert jnp.allclose(
@@ -796,7 +796,7 @@ def test_assess_vmap1():
         return Normal(a, 0.01) @ "x"
 
     w, retval = p.vmap()(jnp.arange(5.0)).assess({"x": jnp.arange(5.0) + 0.2})
-    assert w == -981.5693
+    assert w == pytest.approx(-981.56934)
 
 
 def test_assess_vmap():

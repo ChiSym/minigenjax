@@ -156,3 +156,42 @@ def test_localization():
     winners = jax.vmap(Categorical(logits=scores).sample)(jax.random.split(sub_key, 10))
     winning_poses = jax.tree.map(lambda v: v[winners], poses)
     print(target_pose, winning_poses)
+
+    @Gen
+    def step_model(motion_settings, start, control):
+        p = (
+            MvNormalDiag(
+                start.p + control.ds * start.dp(), motion_settings["p_noise"] * jnp.ones(2)
+            )
+            @ "p"
+        )
+        hd = Normal(start.hd + control.dhd, motion_settings["hd_noise"]) @ "hd"
+        return Pose(p, hd)
+
+    @pytree
+    class Control:
+        ds: Array
+        dhd: Array
+
+    robot_inputs = {
+        "start": some_pose,
+        "controls": Control(ds=jnp.array([0.1, 0.2, 0.2]), dhd=jnp.array([0.3, -0.4, 0.1]))
+    }
+
+    motion_settings = {
+        "p_noise": 0.05,
+        "hd_noise": 0.06
+    }
+
+    @Gen
+    def path_model(motion_settings):
+        @Gen
+        def step(start, control):
+            s = step_model(motion_settings, start, control) @ "step"
+            return s, s
+
+        return step.scan()(robot_inputs["start"], robot_inputs["controls"]) @ "steps"
+
+    key, sub_key = jax.random.split(key)
+    tr = path_model(motion_settings).simulate(sub_key)
+    assert tr["retval"] == 999.

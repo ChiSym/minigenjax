@@ -5,7 +5,6 @@ from .minigenjax import (
     to_score,
     MissingConstraint,
     Constraint,
-    Scan,
 )
 
 from .distribution import (
@@ -34,6 +33,5 @@ __all__ = [
     "MissingConstraint",
     "Mixture",
     "MvNormalDiag",
-    "Scan",
     "pytree",
 ]
