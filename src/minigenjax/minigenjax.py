@@ -170,6 +170,9 @@ class GF[R](GFI[R]):
 
     def abstract(self, *args, **_kwargs):
         return self.abstract_value
+    
+    def concrete(self, *args, **kwargs):
+        return self.f(*args, **kwargs)
 
     def simulate_p(
         self,
