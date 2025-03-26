@@ -112,9 +112,6 @@ class GFI[R](GenPrimitive):
     def map[S](self, f: Callable[[R], S]) -> "MapGF[R,S]":
         return MapGF(self, f)
 
-    def scan(self) -> "ScanGF":
-        return ScanGF(self)
-
     def repeat(self, n: int) -> "RepeatGF[R]":
         return RepeatGF(self, n)
 
@@ -127,9 +124,11 @@ class GFI[R](GenPrimitive):
     @staticmethod
     def make_jaxpr(f, arg_tuple) -> MetaJaxpr:
         flat_args, in_tree = jax.tree.flatten(arg_tuple)
+        flat_avals = jax.tree.map(jax.core.get_aval, flat_args)
+
         flat_f, out_tree_f = flatten_fun_nokwargs(jx.linear_util.wrap_init(f), in_tree)
         jaxpr, shape = jax.make_jaxpr(flat_f.call_wrapped, return_shape=True)(
-            *flat_args
+            *flat_avals
         )
         out_tree = out_tree_f()
         return MetaJaxpr(
@@ -147,10 +146,15 @@ class Gen[R]:
 
     def __call__(self, *args) -> "GF[R]":
         return GF(self.f, args)
+    
+    def get_name(self) -> str:
+        return self.f.__name__
 
     def vmap(self, in_axes: InAxesT = 0) -> Callable[..., "VmapGF[R]"]:
         return lambda *args: VmapGF(self, args, in_axes)
 
+    def scan(self):
+        return lambda *args: ScanGF(self, args)
 
 class GF[R](GFI[R]):
     def __init__(self, f: Callable[..., R], args: tuple):
@@ -172,7 +176,7 @@ class GF[R](GFI[R]):
         return self.abstract_value
     
     def concrete(self, *args, **kwargs):
-        return self.f(*args, **kwargs)
+        return self.f  (*args, **kwargs)
 
     def simulate_p(
         self,
@@ -443,11 +447,13 @@ def Scan(gf: Gen):
 
 
 class ScanGF[R](GFI[tuple[R, Any]]):
-    def __init__(self, gfi: GFI[R]):
-        super().__init__(f"Scan[{gfi.name}]")
-        self.gfi = gfi
-        self.multiple_results = True
-        self.flat_args, self.in_tree = jax.tree.flatten(self.get_args())
+    def __init__(self, g: Gen[R], arg_tuple: tuple):
+        super().__init__(f"Scan[{g.get_name()}]")
+        self.arg_tuple = arg_tuple
+        assert len(arg_tuple) == 2
+        fixed_args = (arg_tuple[0], jax.tree.map(lambda v: v[0], arg_tuple[1]))
+        self.gfi = g(*fixed_args)
+        self.multiple_results = self.gfi.multiple_results
 
     def abstract(self, *args, **kwargs):
         return self.gfi.abstract(*args, **kwargs)
@@ -467,6 +473,7 @@ class ScanGF[R](GFI[tuple[R, Any]]):
             )
             return (v["retval"][0], key), v
 
+        print(f'simulate_p with arg_tuple {arg_tuple}')
         ans = jax.lax.scan(step, (arg_tuple[0], key), arg_tuple[1])
         # Fix the return values to report the things an ordinary use of
         # scan would produce.
@@ -474,10 +481,10 @@ class ScanGF[R](GFI[tuple[R, Any]]):
         return ans[1]
 
     def __matmul__(self, address: str) -> tuple[R, Any]:
-        return self.bind(*self.gfi.get_args(), at=address, inner=self.gfi.get_jaxpr())
+        return jax.tree.unflatten(self.gfi.get_structure(), self.bind(*jax.tree.flatten(self.get_args())[0], at=address, inner=self.gfi.get_jaxpr()))
 
     def get_args(self):
-        return self.gfi.get_args()
+        return self.arg_tuple
 
     def unflatten(self, flat_args):
         return self.gfi.unflatten(flat_args)
