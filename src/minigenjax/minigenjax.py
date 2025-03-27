@@ -499,7 +499,7 @@ class RepeatGF[R](GFI[R]):
         self.n = n
         self.multiple_results = self.gfi.multiple_results
 
-        # TODO: try to reuse self.__matmul__ here, if possible
+        #TODO: try to reuse self.__matmul__ here, if possible
         self.mj = self.make_jaxpr(
             lambda *args: self.bind(
                 *args, at=RepeatGF.SUB_TRACE, n=self.n, inner=self.gfi.get_jaxpr()
@@ -509,7 +509,10 @@ class RepeatGF[R](GFI[R]):
 
     def abstract(self, *args, **kwargs):
         return self.inflate(self.gfi.abstract(*args, **kwargs), self.n)
-
+    
+    def concrete(self, *args, **kwargs):
+        return jax.vmap(lambda _: self.gfi.concrete(*args, **kwargs))(jnp.arange(self.n))
+    
     def simulate_p(
         self,
         key: PRNGKeyArray,
@@ -517,38 +520,33 @@ class RepeatGF[R](GFI[R]):
         address: Address,
         constraint: Constraint,
     ) -> dict:
-        def repeat_inner(key, constraint, params):
-            return Simulate(key, address, constraint).run(self.gfi.get_jaxpr(), params)
+        def repeat_inner(key, constraint):
+            return self.gfi.simulate_p(key, arg_tuple, address, constraint)
 
-        return jax.vmap(repeat_inner, in_axes=(0, 0, None))(
+        return jax.vmap(repeat_inner, in_axes=(0, 0))(
             jax.random.split(key, self.n),
-            constraint,
-            jax.tree.unflatten(self.mj.in_tree, arg_tuple),
+            constraint
         )
 
     def assess_p(
         self, arg_tuple: tuple, constraint: Constraint, address: tuple[str, ...]
     ) -> Float:
-        def vmap_inner(constraint, params):
-            a = Assess(address, constraint)
-            retval = a.run(self.gfi.get_jaxpr(), params)
-            return a.score, retval
+        def vmap_inner(constraint):
+            return self.gfi.assess_p(arg_tuple, constraint, address)
 
-        score, retval = jax.vmap(vmap_inner, in_axes=(0, None))(
-            constraint, jax.tree.unflatten(self.mj.in_tree, arg_tuple)
-        )
+        score, retval = jax.vmap(vmap_inner)( constraint )
         return jnp.sum(score), retval
 
     def __matmul__(self, address: str) -> R:
         return self.bind(
-            *self.gfi.get_args(), at=address, n=self.n, inner=self.gfi.get_jaxpr()
+            *self.gfi.get_args(), at=address, n=self.n
         )
 
     def get_jaxpr(self) -> jx.core.ClosedJaxpr:
         return self.mj.jaxpr
 
     def unflatten(self, flat_args):
-        return jax.tree.unflatten(self.mj.in_tree, flat_args)
+        return self.gfi.unflatten(flat_args)
 
     def get_structure(self):
         return self.mj.out_tree
@@ -658,17 +656,8 @@ class MapGF[R, S](GFI[S]):
         super().__init__(f"Map[{gfi.name}, {f.__name__}]")
         self.gfi = gfi
         self.f = f
-
-        inner = self.gfi.get_jaxpr()
-        self.mj = self.make_jaxpr(
-            lambda *args: self.f(
-                jax.tree.unflatten(
-                    self.gfi.get_structure(),
-                    jax.core.eval_jaxpr(inner.jaxpr, inner.consts, *args),
-                )
-            ),
-            self.gfi.get_args(),
-        )
+        self.multiple_results = self.gfi.multiple_results
+        self.structure = jax.tree.structure(jax.eval_shape(lambda *args: self.f(self.gfi.concrete(*args)), *self.gfi.get_args()))
 
     def abstract(self, *args, **kwargs):
         # this can't be right: what about the effect of f? Why isn't it
@@ -682,15 +671,13 @@ class MapGF[R, S](GFI[S]):
         address: Address,
         constraint: Constraint,
     ) -> dict:
-        return Simulate(key, address, constraint).run(
-            self.mj.jaxpr, arg_tuple, self.mj.out_tree
-        )
+        out = self.gfi.simulate_p(key, arg_tuple, address, constraint)
+        out["retval"] = self.f(out["retval"])
+        return out
 
     def __matmul__(self, address: str) -> S:
-        # TODO (Q): can we declare multiple returns and drop the brackets?
-        return jax.tree.unflatten(
-            self.mj.out_tree, [self.bind(*self.mj.flat_args, at=address)]
-        )
+        b = self.bind(*jax.tree.flatten(self.get_args())[0], at=address)
+        return jax.tree.unflatten(self.structure, b if self.multiple_results else [b])
 
     def get_args(self) -> tuple:
         return self.gfi.get_args()
@@ -699,7 +686,7 @@ class MapGF[R, S](GFI[S]):
         return self.gfi.unflatten(flat_args)
 
     def get_jaxpr(self) -> jx.core.ClosedJaxpr:
-        return self.mj.jaxpr
+        return self.gfi.get_jaxpr()
 
 
 def to_constraint(trace: dict) -> Constraint:
