@@ -173,7 +173,10 @@ class GF[R](GFI[R]):
         return self.abstract_value
     
     def concrete(self, *args, **kwargs):
-        return self.f  (*args, **kwargs)
+        # TODO: we drop kwargs here: do we have to? For example, `at`
+        # seems to show up here. Maybe we are mistakenly propagating
+        # bind kwargs to these function invocations
+        return self.f (*jax.tree.unflatten(self.mj.in_tree, args))
 
     def simulate_p(
         self,
@@ -562,42 +565,32 @@ class VmapGF[R](GFI[R]):
             )
         else:
             self.p_index, self.an_axis = 0, self.in_axes
-        # Compute the "scalar" jaxpr by feeding the un-v-mapped arguments to make_jaxpr
-        # TODO: does `self` need to remember these?
-        self.reduced_avals = self.get_reduced_avals(self.arg_tuple)
-        self.inner_jaxpr, self.inner_shape = jax.make_jaxpr(g.f, return_shape=True)(
-            *self.reduced_avals
-        )
         self.n = self.arg_tuple[self.p_index].shape[self.an_axis]
-        # the shape of the v-mapped function will increase every axis of the result
-        self.shape = jax.tree.map(
-            lambda s: jax.ShapeDtypeStruct((self.n,) + s.shape, s.dtype),
-            self.inner_shape,
-        )
-        self.multiple_results = isinstance(self.inner_shape, tuple)
+        # Compute the "scalar" jaxpr by feeding the un-v-mapped arguments to make_jaxpr
+        self.gfi = g(*self.unvmap_arguments(arg_tuple))
+        self.multiple_results = self.gfi.multiple_results
 
-    def get_reduced_avals(self, arg_tuple):
-        # Produce an abstract arg tuple in which the shape of the
-        # arrays is contracted in those position where vmap would expect
-        # to find a mapping axis
-        def deflate(axis, aval):
-            def deflate_one(axis, aval):
-                assert isinstance(aval, jax.core.ShapedArray)
-                return aval.update(shape=aval.shape[:axis] + aval.shape[axis + 1 :])
-
+    def unvmap_arguments(self, arg_tuple):
+        def unvmap(axis, arg):
             if axis is None:
-                return aval
-            if isinstance(aval, tuple):
-                return jax.tree.map(lambda a: deflate_one(axis, a), aval)
-            return deflate_one(axis, aval)
+                return arg
+            if isinstance(arg, tuple):
+                return jax.tree.map(lambda a: unvmap(axis, a), arg)
+            if axis == 0:
+                return arg[0]
+            raise Exception(f"unimplemented vmap axis :( {axis} ")
 
-        aval_tree = jax.tree.map(jax.core.get_aval, arg_tuple)
-        return jax.tree.map(
-            deflate, self.in_axes, aval_tree, is_leaf=lambda x: x is None
-        )
+        return jax.tree.map(unvmap, self.in_axes, arg_tuple, is_leaf=lambda x: x is None)
 
     def abstract(self, *args, **kwargs):
-        return self.shape
+        # TODO: this isn't the right way to do it. Find out how bind args are propagating here
+        kwargs = {k: v for k, v in kwargs.items() if k != 'at' and k != 'in_axes'}
+        return jax.core.get_aval(
+            jax.eval_shape(lambda args: self.concrete(*args, **kwargs), args)
+        )
+    
+    def concrete(self, *args, **kwargs):
+        return jax.vmap(lambda *args: self.gfi.concrete(*args, **kwargs), in_axes=self.in_axes)(*args)
 
     def simulate_p(
         self,
@@ -607,7 +600,8 @@ class VmapGF[R](GFI[R]):
         constraint: Constraint,
     ) -> dict:
         def vmap_inner(key, constraint, params):
-            return Simulate(key, address, constraint).run(self.inner_jaxpr, params)
+            return self.gfi.simulate_p(key, params, address, constraint)
+            #return Simulate(key, address, constraint).run(self.inner_jaxpr, params)
 
         return jax.vmap(vmap_inner, in_axes=(0, 0, self.in_axes))(
             jax.random.split(key, self.n),
@@ -619,9 +613,7 @@ class VmapGF[R](GFI[R]):
         self, arg_tuple: tuple, constraint: Constraint, address: tuple[str, ...]
     ) -> Float:
         def vmap_inner(constraint, params):
-            a = Assess(address, constraint)
-            retval = a.run(self.inner_jaxpr, params)
-            return a.score, retval
+            return self.gfi.assess_p(params, constraint, address)
 
         score, retval = jax.vmap(vmap_inner, in_axes=(0, self.in_axes))(
             constraint, jax.tree.unflatten(self.in_tree, arg_tuple)
