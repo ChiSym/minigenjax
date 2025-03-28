@@ -1,8 +1,6 @@
 from .minigenjax import (
     Gen,
     Cond,
-    to_constraint,
-    to_score,
     MissingConstraint,
     Constraint,
 )
@@ -15,6 +13,11 @@ from .distribution import (
     Bernoulli,
     Mixture,
     MvNormalDiag,
+)
+
+from .trace import (
+    to_constraint,
+    to_score,
 )
 
 from .pytree import pytree as pytree

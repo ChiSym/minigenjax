@@ -3,11 +3,13 @@ from collections import namedtuple
 from typing import Any, Callable, Sequence
 from jax._src.core import ClosedJaxpr as ClosedJaxpr
 import jax
+from jax._src.tree_util import PyTreeDef as PyTreeDef
 import jax.tree
 import jax.api_util
 import jax.numpy as jnp
 from jax.interpreters import batching
 from .key import KeySplit
+from .trace import to_constraint, to_score, to_weight
 import jax.extend as jx
 import jax.core
 from jaxtyping import Array, ArrayLike, PRNGKeyArray, Float
@@ -70,6 +72,9 @@ class GenPrimitive(jx.core.Primitive):
     ) -> tuple[Array, Any]:
         raise NotImplementedError(f"assess_p: {self}")
 
+    def get_args(self) -> tuple:
+        raise NotImplementedError(f"get_args: {self}")
+
     def inflate(self, v: Any, n: int):
         def inflate_one(v):
             return v.update(shape=(n,) + v.shape)
@@ -103,12 +108,6 @@ class GFI[R](GenPrimitive):
     def assess(self, constraint) -> tuple[Array, Array]:
         return self.assess_p(self.get_args(), constraint, ())
 
-    def __matmul__(self, address: str) -> R:
-        raise NotImplementedError(f"{self} @ {address}")
-
-    def get_args(self) -> tuple:
-        raise NotImplementedError(f"get_args: {self}")
-
     def map[S](self, f: Callable[[R], S]) -> "MapGF[R,S]":
         return MapGF(self, f)
 
@@ -117,6 +116,12 @@ class GFI[R](GenPrimitive):
 
     def get_structure(self) -> jax.tree_util.PyTreeDef:
         raise NotImplementedError(f"get_structure: {self}")
+
+    def __matmul__(self, address: str):
+        r = self.bind(*jax.tree.flatten(self.get_args())[0], at=address)
+        return jax.tree.unflatten(
+            self.get_structure(), r if self.multiple_results else [r]
+        )
 
     @staticmethod
     def make_jaxpr(f, arg_tuple) -> MetaJaxpr:
@@ -143,7 +148,7 @@ class Gen[R]:
 
     def __call__(self, *args) -> "GF[R]":
         return GF(self.f, args)
-    
+
     def get_name(self) -> str:
         return self.f.__name__
 
@@ -152,6 +157,12 @@ class Gen[R]:
 
     def scan(self):
         return lambda *args: ScanGF(self, args)
+
+    def partial(self, arg_tuple: tuple):
+        # we want to emit a Gen which can receive combinator applications
+        # or further arguments.
+        pass
+
 
 class GF[R](GFI[R]):
     def __init__(self, f: Callable[..., R], args: tuple):
@@ -171,12 +182,12 @@ class GF[R](GFI[R]):
 
     def abstract(self, *args, **_kwargs):
         return self.abstract_value
-    
+
     def concrete(self, *args, **kwargs):
         # TODO: we drop kwargs here: do we have to? For example, `at`
         # seems to show up here. Maybe we are mistakenly propagating
         # bind kwargs to these function invocations
-        return self.f (*jax.tree.unflatten(self.mj.in_tree, args))
+        return self.f(*jax.tree.unflatten(self.mj.in_tree, args))
 
     def simulate_p(
         self,
@@ -195,10 +206,6 @@ class GF[R](GFI[R]):
         a = Assess[R](address, constraint)
         retval = a.run(self.mj.jaxpr, arg_tuple, self.mj.out_tree)
         return a.score, retval
-
-    def __matmul__(self, address: str):
-        r = self.bind(*self.mj.flat_args, at=address)
-        return jax.tree.unflatten(self.mj.out_tree, r if self.multiple_results else [r])
 
     def get_args(self) -> tuple:
         return self.args
@@ -256,9 +263,7 @@ class Transformation[R]:
         # there's only one key consumer in this JAXPR, then there's no need
         # to split it.
         self.key_consumer_count = sum(
-            isinstance(eqn.primitive, GenPrimitive)
-            or eqn.primitive is jax.lax.cond_p
-            or eqn.primitive is jax.lax.scan_p
+            isinstance(eqn.primitive, GenPrimitive) or eqn.primitive is jax.lax.cond_p
             for eqn in jaxpr.eqns
         )
 
@@ -344,6 +349,7 @@ class Simulate(Transformation[dict]):
             and len(keys := inner_trace.keys()) == 1
             and (key := next(iter(keys))).startswith("__")
         ):
+            raise Exception("foo")
             # absorb interstitial trace points like __repeat, __vmap that may
             # occur when combinators are stacked.
             sub_trace["subtraces"] = inner_trace[key]["subtraces"]
@@ -391,8 +397,6 @@ class Simulate(Transformation[dict]):
                 self.trace[sub_address] = ans["subtraces"][sub_address]
 
             self.w += jnp.sum(ans.get("w", 0))
-            # The reasons why this result has to be a sequence is obscure to me,
-            # but cond_p as a primitive requires "multiple results."
             return ans["retval"]
 
         return super().handle_eqn(eqn, params, bind_params)
@@ -468,18 +472,18 @@ class ScanGF[R](GFI[tuple[R, Any]]):
             v = self.gfi.simulate_p(k1, (carry, s), address, constraint)
             return (v["retval"][0], key), v
 
-        print(f'simulate_p with arg_tuple {arg_tuple}')
+        print(f"simulate_p with arg_tuple {arg_tuple}")
         ans = jax.lax.scan(step, (arg_tuple[0], key), arg_tuple[1])
         # Fix the return values to report the things an ordinary use of
         # scan would produce.
         ans[1]["retval"] = (ans[0][0], ans[1]["retval"][0])
         return ans[1]
 
-    def __matmul__(self, address: str) -> tuple[R, Any]:
-        return jax.tree.unflatten(self.gfi.get_structure(), self.bind(*jax.tree.flatten(self.get_args())[0], at=address))
-
-    def get_args(self):
+    def get_args(self) -> tuple:
         return self.arg_tuple
+
+    def get_structure(self) -> PyTreeDef:
+        return self.gfi.get_structure()
 
     def unflatten(self, flat_args):
         return self.gfi.unflatten(flat_args)
@@ -494,20 +498,14 @@ class RepeatGF[R](GFI[R]):
         self.n = n
         self.multiple_results = self.gfi.multiple_results
 
-        #TODO: try to reuse self.__matmul__ here, if possible
-        self.mj = self.make_jaxpr(
-            lambda *args: self.bind(
-                *args, at=RepeatGF.SUB_TRACE, n=self.n
-            ),
-            self.get_args(),
-        )
-
     def abstract(self, *args, **kwargs):
         return self.inflate(self.gfi.abstract(*args, **kwargs), self.n)
-    
+
     def concrete(self, *args, **kwargs):
-        return jax.vmap(lambda _: self.gfi.concrete(*args, **kwargs))(jnp.arange(self.n))
-    
+        return jax.vmap(lambda _: self.gfi.concrete(*args, **kwargs))(
+            jnp.arange(self.n)
+        )
+
     def simulate_p(
         self,
         key: PRNGKeyArray,
@@ -519,8 +517,7 @@ class RepeatGF[R](GFI[R]):
             return self.gfi.simulate_p(key, arg_tuple, address, constraint)
 
         return jax.vmap(repeat_inner, in_axes=(0, 0))(
-            jax.random.split(key, self.n),
-            constraint
+            jax.random.split(key, self.n), constraint
         )
 
     def assess_p(
@@ -529,19 +526,14 @@ class RepeatGF[R](GFI[R]):
         def vmap_inner(constraint):
             return self.gfi.assess_p(arg_tuple, constraint, address)
 
-        score, retval = jax.vmap(vmap_inner)( constraint )
+        score, retval = jax.vmap(vmap_inner)(constraint)
         return jnp.sum(score), retval
-
-    def __matmul__(self, address: str) -> R:
-        return self.bind(
-            *self.gfi.get_args(), at=address, n=self.n
-        )
 
     def unflatten(self, flat_args):
         return self.gfi.unflatten(flat_args)
 
     def get_structure(self):
-        return self.mj.out_tree
+        return self.gfi.get_structure()
 
     def get_args(self) -> tuple:
         return self.gfi.get_args()
@@ -566,31 +558,39 @@ class VmapGF[R](GFI[R]):
         else:
             self.p_index, self.an_axis = 0, self.in_axes
         self.n = self.arg_tuple[self.p_index].shape[self.an_axis]
-        # Compute the "scalar" jaxpr by feeding the un-v-mapped arguments to make_jaxpr
-        self.gfi = g(*self.unvmap_arguments(arg_tuple))
+        # Build the "scalar" GF by feeding the un-v-mapped arguments to the function
+        self.gfi = g(*self.un_vmap_arguments(arg_tuple))
         self.multiple_results = self.gfi.multiple_results
 
-    def unvmap_arguments(self, arg_tuple):
-        def unvmap(axis, arg):
+    def un_vmap_arguments(self, arg_tuple):
+        def un_vmap(axis, arg):
             if axis is None:
                 return arg
             if isinstance(arg, tuple):
-                return jax.tree.map(lambda a: unvmap(axis, a), arg)
+                return jax.tree.map(lambda a: un_vmap(axis, a), arg)
             if axis == 0:
                 return arg[0]
             raise Exception(f"unimplemented vmap axis :( {axis} ")
 
-        return jax.tree.map(unvmap, self.in_axes, arg_tuple, is_leaf=lambda x: x is None)
+        return jax.tree.map(
+            un_vmap, self.in_axes, arg_tuple, is_leaf=lambda x: x is None
+        )
 
     def abstract(self, *args, **kwargs):
         # TODO: this isn't the right way to do it. Find out how bind args are propagating here
-        kwargs = {k: v for k, v in kwargs.items() if k != 'at' and k != 'in_axes'}
+        kwargs = {k: v for k, v in kwargs.items() if k != "at" and k != "in_axes"}
         return jax.core.get_aval(
             jax.eval_shape(lambda args: self.concrete(*args, **kwargs), args)
         )
-    
+
     def concrete(self, *args, **kwargs):
-        return jax.vmap(lambda *args: self.gfi.concrete(*args, **kwargs), in_axes=self.in_axes)(*args)
+        return jax.vmap(
+            lambda *args: self.gfi.concrete(*jax.tree.flatten(args)[0], **kwargs),
+            in_axes=self.in_axes,
+        )(*jax.tree.unflatten(self.in_tree, args))
+
+    def get_structure(self):
+        return self.gfi.get_structure()
 
     def simulate_p(
         self,
@@ -601,7 +601,7 @@ class VmapGF[R](GFI[R]):
     ) -> dict:
         def vmap_inner(key, constraint, params):
             return self.gfi.simulate_p(key, params, address, constraint)
-            #return Simulate(key, address, constraint).run(self.inner_jaxpr, params)
+            # return Simulate(key, address, constraint).run(self.inner_jaxpr, params)
 
         return jax.vmap(vmap_inner, in_axes=(0, 0, self.in_axes))(
             jax.random.split(key, self.n),
@@ -620,11 +620,6 @@ class VmapGF[R](GFI[R]):
         )
         return jnp.sum(score), retval
 
-    def __matmul__(self, address: str) -> R:
-        return self.bind(
-            *self.flat_args, at=address, in_axes=self.in_axes
-        )
-
     def unflatten(self, flat_args):
         return jax.tree.unflatten(self.in_tree, flat_args)
 
@@ -638,7 +633,11 @@ class MapGF[R, S](GFI[S]):
         self.gfi = gfi
         self.f = f
         self.multiple_results = self.gfi.multiple_results
-        self.structure = jax.tree.structure(jax.eval_shape(lambda *args: self.f(self.gfi.concrete(*args)), *self.gfi.get_args()))
+        self.structure = jax.tree.structure(
+            jax.eval_shape(
+                lambda *args: self.f(self.gfi.concrete(*args)), *self.gfi.get_args()
+            )
+        )
 
     def abstract(self, *args, **kwargs):
         # this can't be right: what about the effect of f? Why isn't it
@@ -656,35 +655,14 @@ class MapGF[R, S](GFI[S]):
         out["retval"] = self.f(out["retval"])
         return out
 
-    def __matmul__(self, address: str) -> S:
-        b = self.bind(*jax.tree.flatten(self.get_args())[0], at=address)
-        return jax.tree.unflatten(self.structure, b if self.multiple_results else [b])
+    def get_structure(self):
+        return self.structure
 
     def get_args(self) -> tuple:
         return self.gfi.get_args()
 
     def unflatten(self, flat_args) -> tuple:
         return self.gfi.unflatten(flat_args)
-
-
-def to_constraint(trace: dict) -> Constraint:
-    if "subtraces" in trace:
-        return {k: to_constraint(v) for k, v in trace["subtraces"].items()}
-    return trace["retval"]
-
-
-def trace_sum(trace: dict, key: str) -> Float:
-    if "subtraces" in trace:
-        return sum(jnp.sum(trace_sum(v, key)) for v in trace["subtraces"].values())
-    return jnp.sum(trace.get(key, 0.0))
-
-
-def to_score(trace: dict) -> Float:
-    return trace_sum(trace, "score")
-
-
-def to_weight(trace: dict) -> Float:
-    return trace_sum(trace, "w")
 
 
 # %%
