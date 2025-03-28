@@ -444,12 +444,12 @@ def test_plain_scan():
         return jax.lax.scan(lambda a, b: (a + b, a + b), init, jnp.arange(5.0))
 
     tr = model(10.0).simulate(key0)
-    assert tr["retval"][0] == 19.987484
+    assert tr["retval"][0] == 19.997942
     assert jnp.allclose(
         tr["retval"][1],
-        jnp.array([9.987485, 10.987485, 12.987485, 15.987485, 19.987484]),
+        jnp.array([9.997942, 10.997942, 12.997942, 15.997942, 19.997942]),
     )
-    assert tr["subtraces"]["init"]["retval"] == 9.987485
+    assert tr["subtraces"]["init"]["retval"] == 9.997942
 
 
 class TestCurve:
