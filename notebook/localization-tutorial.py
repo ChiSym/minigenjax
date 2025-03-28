@@ -1667,7 +1667,7 @@ def path_model(motion_settings):
         s = step_model(motion_settings, start, control) @ "step"
         return s, s
 
-    return step.scan()(robot_inputs["start"], robot_inputs["controls"]) @ "steps"
+    return step.scan(robot_inputs["start"], robot_inputs["controls"]) @ "steps"
 
 
 # %% [markdown]
@@ -1749,7 +1749,7 @@ def full_model(motion_settings, sensor_noise):
     return (
         full_model_kernel.partial_apply(motion_settings, sensor_noise)
         .map(diag)
-        .scan()(robot_inputs["start"], robot_inputs["controls"])
+        .scan(robot_inputs["start"], robot_inputs["controls"])
         @ "steps"
     )
 

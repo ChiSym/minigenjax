@@ -155,8 +155,8 @@ class Gen[R]:
     def vmap(self, in_axes: InAxesT = 0) -> Callable[..., "VmapGF[R]"]:
         return lambda *args: VmapGF(self, args, in_axes)
 
-    def scan(self):
-        return lambda *args: ScanGF(self, args)
+    def scan(self, *args):
+        return ScanGF(self, args)
 
     def partial(self, arg_tuple: tuple):
         # we want to emit a Gen which can receive combinator applications
