@@ -161,7 +161,8 @@ def test_localization():
     def step_model(motion_settings, start, control):
         p = (
             MvNormalDiag(
-                start.p + control.ds * start.dp(), motion_settings["p_noise"] * jnp.ones(2)
+                start.p + control.ds * start.dp(),
+                motion_settings["p_noise"] * jnp.ones(2),
             )
             @ "p"
         )
@@ -175,13 +176,12 @@ def test_localization():
 
     robot_inputs = {
         "start": some_pose,
-        "controls": Control(ds=jnp.array([0.1, 0.2, 0.2]), dhd=jnp.array([0.3, -0.4, 0.1]))
+        "controls": Control(
+            ds=jnp.array([0.1, 0.2, 0.2]), dhd=jnp.array([0.3, -0.4, 0.1])
+        ),
     }
 
-    motion_settings = {
-        "p_noise": 0.05,
-        "hd_noise": 0.06
-    }
+    motion_settings = {"p_noise": 0.05, "hd_noise": 0.06}
 
     @Gen
     def path_model(motion_settings):
@@ -190,8 +190,8 @@ def test_localization():
             s = step_model(motion_settings, start, control) @ "step"
             return s, s
 
-        return step.scan()(robot_inputs["start"], robot_inputs["controls"]) @ "steps"
+        return step.scan(robot_inputs["start"], robot_inputs["controls"]) @ "steps"
 
     key, sub_key = jax.random.split(key)
     tr = path_model(motion_settings).simulate(sub_key)
-    assert tr["retval"] == 999.
+    assert tr["retval"] == 999.0
