@@ -959,4 +959,12 @@ def test_vmap_importance():
     assert w3 == w2 + w1
 
 
-# %%
+def test_partial():
+    @Gen
+    def model(x, y):
+        return Normal(x, y) @ "x"
+
+    tr = model.partial(10.0)(0.01).simulate(key0)
+    assert tr["retval"] == 9.997942
+    tr1 = model.partial(10.0, 0.01)().simulate(key0)
+    assert tr1["retval"] == tr["retval"]
