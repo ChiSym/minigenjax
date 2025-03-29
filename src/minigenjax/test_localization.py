@@ -190,7 +190,7 @@ def test_localization():
             s = step_model(motion_settings, start, control) @ "step"
             return s, s
 
-        return step.scan(robot_inputs["start"], robot_inputs["controls"]) @ "steps"
+        return step.scan()(robot_inputs["start"], robot_inputs["controls"]) @ "steps"
 
     key, sub_key = jax.random.split(key)
     tr = path_model(motion_settings).simulate(sub_key)
