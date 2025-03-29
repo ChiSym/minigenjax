@@ -138,16 +138,17 @@ GenSymT = Callable[[jax.core.AbstractValue], jx.core.Var]
 
 # %%
 class Gen[R]:
-    def __init__(self, f: Callable[..., R], impl=None):
+    def __init__(self, f: Callable[..., R], impl=None, partial_args=()):
         self.f = f
         self.impl = impl
+        self.partial_args = partial_args
 
     def get_name(self) -> str:
         return self.f.__name__
 
     def __call__(self, *args):
         if self.impl is None:
-            return GF(self, args)
+            return GF(self, args, partial_args=self.partial_args)
         return self.impl(*args)
 
     def repeat(self, n):
@@ -174,14 +175,12 @@ class Gen[R]:
 
         return Gen(self.f, impl=impl)
 
-    def partial(self, arg_tuple: tuple):
-        # we want to emit a Gen which can receive combinator applications
-        # or further arguments.
-        pass
+    def partial(self, *args):
+        return Gen(self.f, self.impl, self.partial_args + args)
 
 
 class GF[R](GFI[R]):
-    def __init__(self, g: Gen, args: tuple):
+    def __init__(self, g: Gen, args: tuple, partial_args=()):
         super().__init__(f"GF[{g.get_name()}]")
 
         _, self.in_tree = jax.tree.flatten(args)
@@ -189,17 +188,19 @@ class GF[R](GFI[R]):
         # TODO: make_jaxpr already computes this, reuse it
         self.f = g.f
         self.args = args
-        self.mj = self.make_jaxpr(g.f, args)
-        self.multiple_results = self.mj.out_tree.num_leaves > 1
+        self.partial_args = partial_args
+        self.shape = jax.eval_shape(self.f, *partial_args, *args)
+        self.structure = jax.tree.structure(self.shape)
+        self.abstract_value = list(
+            map(jax.core.get_aval, jax.tree.flatten(self.shape)[0])
+        )
 
-        a_vals = [ov.aval for ov in self.mj.jaxpr.jaxpr.outvars]
-        if a_vals:
-            self.abstract_value = a_vals if self.multiple_results else a_vals[0]
-        else:
-            self.abstract_value = None
+        # with jax.check_tracer_leaks():
+        self.mj = self.make_jaxpr(g.f, partial_args + args)
+        self.multiple_results = self.structure.num_leaves > 1
 
     def abstract(self, *args, **_kwargs):
-        return self.abstract_value
+        return self.abstract_value if self.multiple_results else self.abstract_value[0]
 
     def concrete(self, *args, **kwargs):
         return self.f(*jax.tree.unflatten(self.in_tree, args))
@@ -215,21 +216,21 @@ class GF[R](GFI[R]):
         constraint: Constraint,
     ) -> dict:
         return Simulate(key, address, constraint).run(
-            self.mj.jaxpr, arg_tuple, self.mj.out_tree
+            self.mj.jaxpr, self.partial_args + arg_tuple, self.mj.out_tree
         )
 
     def assess_p(
         self, arg_tuple: tuple, constraint: Constraint, address
     ) -> tuple[Float, R]:
         a = Assess[R](address, constraint)
-        retval = a.run(self.mj.jaxpr, arg_tuple, self.mj.out_tree)
+        retval = a.run(self.mj.jaxpr, self.partial_args + arg_tuple, self.mj.out_tree)
         return a.score, retval
 
     def get_args(self) -> tuple:
         return self.args
 
     def get_structure(self) -> jax.tree_util.PyTreeDef:
-        return self.mj.out_tree
+        return self.structure
 
     def unflatten(self, flat_args) -> jax.tree_util.PyTreeDef:
         return jax.tree.unflatten(self.in_tree, flat_args)
