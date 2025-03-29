@@ -405,9 +405,9 @@ def test_scan_model():
 
     @Gen
     def scan_update():
-        return update.scan(10.0, jnp.arange(0.1, 0.6, 0.1)) @ "S"
+        return update.scan()(10.0, jnp.arange(0.1, 0.6, 0.1)) @ "S"
 
-    tr = update.scan(10.0, jnp.arange(0.1, 0.6, 0.1)).simulate(key0)
+    tr = update.scan()(10.0, jnp.arange(0.1, 0.6, 0.1)).simulate(key0)
     print(f"final tr {tr}")
     assert jnp.allclose(tr["retval"][0], 11.482168)
     assert jnp.allclose(
@@ -542,7 +542,7 @@ class TestCurve:
         assert tr["retval"].shape == (10, 7)
 
 
-def test_map():
+def test_map_vmap():
     @Gen
     def noisy(x):
         return Normal(x, 0.01) @ "x"
@@ -555,6 +555,19 @@ def test_map():
     assert jnp.allclose(tr["retval"], jnp.array([15.0111885, 15.005781, 15.008535]))
 
 
+def test_map():
+    @Gen
+    def noisy(x):
+        return Normal(x, 0.01) @ "x"
+
+    def plus5(x):
+        return x + 5.0
+
+    noisy_plus5 = noisy.map(plus5)
+    tr = noisy_plus5(10.0).simulate(key0)
+    assert tr["retval"] == 14.997942
+
+
 def test_simple_repeat():
     @Gen
     def coefficient():
@@ -563,7 +576,7 @@ def test_simple_repeat():
     def Poly(coefficient_gf, n):
         @Gen
         def poly():
-            return coefficient_gf().repeat(n) @ "cs"
+            return coefficient_gf.repeat(n)() @ "cs"
 
         return poly
 
@@ -581,7 +594,7 @@ def test_repeat_in_model():
 
     @Gen
     def xs():
-        return x(10.0).repeat(4) @ "xs"
+        return x.repeat(4)(10.0) @ "xs"
 
     tr = xs().simulate(key0)
     assert jnp.allclose(
@@ -594,7 +607,7 @@ def test_repeat_of_repeat():
     def y(x):
         return Normal(2.0 * x + 1, 0.1) @ "y"
 
-    tr = y(5.0).repeat(4).repeat(3).simulate(key0)
+    tr = y.repeat(4).repeat(3)(5.0).simulate(key0)
     assert jnp.allclose(
         tr["retval"],
         jnp.array(
@@ -621,7 +634,7 @@ def test_shaped_distribution():
         tr["retval"], jnp.array([2.9653215, 3.225159, 4.63303, 5.296382])
     )
     print("a done")
-    tr = jax.jit(f(2.0).repeat(3).simulate)(key0)
+    tr = jax.jit(f.repeat(3)(2.0).simulate)(key0)
     assert jnp.allclose(
         tr["retval"],
         jnp.array(
@@ -654,7 +667,7 @@ def test_map_in_model():
 
     @Gen
     def mx():
-        return x(7.0).map(lambda t: t + 13.0) @ "mx"
+        return x.map(lambda t: t + 13.0)(7.0) @ "mx"
 
     tr = jax.vmap(mx().simulate)(jax.random.split(key0, 5))
     assert jnp.allclose(
@@ -686,7 +699,7 @@ def test_repeat_of_map():
     def y(x):
         return Normal(x, 0.1) @ "y"
 
-    mr = y(7.0).map(lambda x: x + 13.0).repeat(5)
+    mr = y.map(lambda x: x + 13.0).repeat(5)(7.0)
 
     tr = mr.simulate(key0)
     assert jnp.allclose(

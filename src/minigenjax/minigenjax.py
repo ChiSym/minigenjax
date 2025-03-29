@@ -32,7 +32,7 @@ class MissingConstraint(Exception):
     pass
 
 
-MetaJaxpr = namedtuple("MetaJaxpr", ["jaxpr", "in_tree", "out_tree", "flat_args"])
+MetaJaxpr = namedtuple("MetaJaxpr", ["jaxpr", "in_tree", "out_tree"])
 
 
 class GenPrimitive(jx.core.Primitive):
@@ -111,9 +111,6 @@ class GFI[R](GenPrimitive):
     def map[S](self, f: Callable[[R], S]) -> "MapGF[R,S]":
         return MapGF(self, f)
 
-    def repeat(self, n: int) -> "RepeatGF[R]":
-        return RepeatGF(self, n)
-
     def get_structure(self) -> jax.tree_util.PyTreeDef:
         raise NotImplementedError(f"get_structure: {self}")
 
@@ -133,9 +130,7 @@ class GFI[R](GenPrimitive):
             *flat_avals
         )
         out_tree = out_tree_f()
-        return MetaJaxpr(
-            jaxpr=jaxpr, in_tree=in_tree, out_tree=out_tree, flat_args=flat_args
-        )
+        return MetaJaxpr(jaxpr=jaxpr, in_tree=in_tree, out_tree=out_tree)
 
 
 GenSymT = Callable[[jax.core.AbstractValue], jx.core.Var]
@@ -143,20 +138,41 @@ GenSymT = Callable[[jax.core.AbstractValue], jx.core.Var]
 
 # %%
 class Gen[R]:
-    def __init__(self, f: Callable[..., R]):
+    def __init__(self, f: Callable[..., R], impl=None):
         self.f = f
-
-    def __call__(self, *args) -> "GF[R]":
-        return GF(self.f, args)
+        self.impl = impl
 
     def get_name(self) -> str:
         return self.f.__name__
 
-    def vmap(self, in_axes: InAxesT = 0) -> Callable[..., "VmapGF[R]"]:
-        return lambda *args: VmapGF(self, args, in_axes)
+    def __call__(self, *args):
+        if self.impl is None:
+            return GF(self, args)
+        return self.impl(*args)
 
-    def scan(self, *args):
-        return ScanGF(self, args)
+    def repeat(self, n):
+        def impl(*args):
+            return RepeatGF(self(*args), n)
+
+        return Gen(self.f, impl=impl)
+
+    def vmap(self, in_axes: InAxesT = 0):
+        def impl(*args):
+            return VmapGF(self, args, in_axes)
+
+        return Gen(self.f, impl=impl)
+
+    def map(self, g):
+        def impl(*args):
+            return MapGF(self(*args), g)
+
+        return Gen(self.f, impl=impl)
+
+    def scan(self):
+        def impl(*args):
+            return ScanGF(self, args)
+
+        return Gen(self.f, impl=impl)
 
     def partial(self, arg_tuple: tuple):
         # we want to emit a Gen which can receive combinator applications
@@ -165,13 +181,15 @@ class Gen[R]:
 
 
 class GF[R](GFI[R]):
-    def __init__(self, f: Callable[..., R], args: tuple):
-        super().__init__(f"GF[{f.__name__}]")
+    def __init__(self, g: Gen, args: tuple):
+        super().__init__(f"GF[{g.get_name()}]")
 
-        self.wf = jx.linear_util.wrap_init(f)
-        self.f = f
+        _, self.in_tree = jax.tree.flatten(args)
+
+        # TODO: make_jaxpr already computes this, reuse it
+        self.f = g.f
         self.args = args
-        self.mj = self.make_jaxpr(self.f, self.args)
+        self.mj = self.make_jaxpr(g.f, args)
         self.multiple_results = self.mj.out_tree.num_leaves > 1
 
         a_vals = [ov.aval for ov in self.mj.jaxpr.jaxpr.outvars]
@@ -184,10 +202,10 @@ class GF[R](GFI[R]):
         return self.abstract_value
 
     def concrete(self, *args, **kwargs):
-        # TODO: we drop kwargs here: do we have to? For example, `at`
-        # seems to show up here. Maybe we are mistakenly propagating
-        # bind kwargs to these function invocations
-        return self.f(*jax.tree.unflatten(self.mj.in_tree, args))
+        return self.f(*jax.tree.unflatten(self.in_tree, args))
+
+    def repeat(self, n):
+        return RepeatGF(self, n)
 
     def simulate_p(
         self,
@@ -214,7 +232,7 @@ class GF[R](GFI[R]):
         return self.mj.out_tree
 
     def unflatten(self, flat_args) -> jax.tree_util.PyTreeDef:
-        return jax.tree.unflatten(self.mj.in_tree, flat_args)
+        return jax.tree.unflatten(self.in_tree, flat_args)
 
 
 class Transformation[R]:
@@ -421,26 +439,7 @@ def Cond(tf, ff):
                 )
 
             def simulate(self, key: PRNGKeyArray):
-                return GF(lambda: self @ "__cond", ()).simulate(key)
-
-        return Binder()
-
-    return ctor
-
-
-def Scan(gf: Gen):
-    """Scan combinator. Turns a GF of two parameters `(state, update)`
-    returning a pair of updated state and step data to record into
-    a generative function of an initial state and an array of updates."""
-
-    def ctor(init, steps):
-        class Binder:
-            def __matmul__(self, address: str):
-                def inner(carry, step):
-                    c, s = gf(carry, step) @ address
-                    return c, s
-
-                return jax.lax.scan(inner, init, steps)
+                return GF(Gen(lambda: self @ "__cond"), ()).simulate(key)
 
         return Binder()
 
@@ -448,12 +447,11 @@ def Scan(gf: Gen):
 
 
 class ScanGF[R](GFI[tuple[R, Any]]):
-    def __init__(self, g: Gen[R], arg_tuple: tuple):
-        super().__init__(f"Scan[{g.get_name()}]")
+    def __init__(self, g: Gen, arg_tuple: tuple):
         self.arg_tuple = arg_tuple
-        assert len(arg_tuple) == 2
         fixed_args = (arg_tuple[0], jax.tree.map(lambda v: v[0], arg_tuple[1]))
         self.gfi = g(*fixed_args)
+        super().__init__(f"ScanGF[{self.gfi.name}]")
         self.multiple_results = self.gfi.multiple_results
 
     def abstract(self, *args, **kwargs):
@@ -493,10 +491,9 @@ class RepeatGF[R](GFI[R]):
     SUB_TRACE = "__repeat"
 
     def __init__(self, gfi: GFI[R], n: int):
-        super().__init__(f"Repeat[{gfi.name}, {n}]")
-        self.gfi = gfi
+        super().__init__(f"RepeatGF[{n}, {gfi.name}]")
         self.n = n
-        self.multiple_results = self.gfi.multiple_results
+        self.gfi = gfi
 
     def abstract(self, *args, **kwargs):
         return self.inflate(self.gfi.abstract(*args, **kwargs), self.n)
@@ -540,16 +537,17 @@ class RepeatGF[R](GFI[R]):
 
 
 class VmapGF[R](GFI[R]):
-    def __init__(self, g: Gen, arg_tuple: tuple, in_axes: InAxesT):
-        super().__init__(f"Vmap[{g.f.__name__}]")
+    def __init__(self, gen: Gen, arg_tuple: tuple, in_axes: InAxesT):
         if in_axes is None or in_axes == ():
             raise NotImplementedError(
                 "must specify at least one argument/axis for Vmap"
             )
-        # TODO: consider if we want to make this
         self.arg_tuple = arg_tuple
-        self.flat_args, self.in_tree = jax.tree.flatten(self.arg_tuple)
         self.in_axes = in_axes
+        _, self.in_tree = jax.tree.flatten(arg_tuple)
+        self.gfi = gen(*self.un_vmap_arguments(arg_tuple))
+        super().__init__(f"Vmap[{self.gfi.name}]")
+
         # find one pair of (parameter number, axis) to use to determine size of vmap
         if isinstance(self.in_axes, tuple):
             self.p_index, self.an_axis = next(
@@ -557,9 +555,7 @@ class VmapGF[R](GFI[R]):
             )
         else:
             self.p_index, self.an_axis = 0, self.in_axes
-        self.n = self.arg_tuple[self.p_index].shape[self.an_axis]
-        # Build the "scalar" GF by feeding the un-v-mapped arguments to the function
-        self.gfi = g(*self.un_vmap_arguments(arg_tuple))
+        self.n = arg_tuple[self.p_index].shape[self.an_axis]
         self.multiple_results = self.gfi.multiple_results
 
     def un_vmap_arguments(self, arg_tuple):
