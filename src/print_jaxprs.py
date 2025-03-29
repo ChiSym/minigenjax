@@ -30,13 +30,16 @@ def print_model_jaxprs():
     print_sim_jaxpr(model3, 13.0)
     print_sim_jaxpr(cond_model, 14.0)
     print_sim_jaxpr(model3.vmap(), jnp.arange(15.0, 20.0))
-    print_sim_jaxpr(model3(21.0).repeat, 5)
-    print_sim_jaxpr(model3(22.0).repeat(3).repeat, 4)
+    print_sim_jaxpr(model3.repeat(5), 21.0)
+    print_sim_jaxpr(model3.repeat(3).repeat(2), 22.0)
     print_sim_jaxpr(model2p, 23.0, 24.0)
     print_sim_jaxpr(model2p.vmap(in_axes=(0, None)), jnp.arange(25.0, 36.0), 26.0)
+    print_sim_jaxpr(
+        model2p.vmap(in_axes=(0, None)).vmap(in_axes=(None, 0)),
+        jnp.arange(25.0, 36.0),
+        jnp.arange(0.0, 1.0, 0.2),
+    )
 
-
-#    print_sim_jaxpr(model2p.vmap(in_axes=(0, None)).vmap(in_axes=(None, 0)), jnp.arange(25., 36.), jnp.arange(0.0, 1.0, 0.2))
 
 if __name__ == "__main__":
     print_model_jaxprs()
