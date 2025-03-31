@@ -32,9 +32,6 @@ class MissingConstraint(Exception):
     pass
 
 
-MetaJaxpr = namedtuple("MetaJaxpr", ["jaxpr", "in_tree", "out_tree"])
-
-
 class GenPrimitive(jx.core.Primitive):
     def __init__(self, name):
         super().__init__(name)
@@ -121,16 +118,11 @@ class GFI[R](GenPrimitive):
         )
 
     @staticmethod
-    def make_jaxpr(f, arg_tuple) -> MetaJaxpr:
-        flat_args, in_tree = jax.tree.flatten(arg_tuple)
-        flat_avals = jax.tree.map(jax.core.get_aval, flat_args)
-
-        flat_f, out_tree_f = flatten_fun_nokwargs(jx.linear_util.wrap_init(f), in_tree)
-        jaxpr, shape = jax.make_jaxpr(flat_f.call_wrapped, return_shape=True)(
-            *flat_avals
+    def make_jaxpr(f, arg_tuple) -> ClosedJaxpr:
+        jaxpr = jax.make_jaxpr(f)(
+            *jax.tree.map(jax.core.get_aval, arg_tuple)
         )
-        out_tree = out_tree_f()
-        return MetaJaxpr(jaxpr=jaxpr, in_tree=in_tree, out_tree=out_tree)
+        return jaxpr
 
 
 GenSymT = Callable[[jax.core.AbstractValue], jx.core.Var]
@@ -189,14 +181,17 @@ class GF[R](GFI[R]):
         self.f = g.f
         self.args = args
         self.partial_args = partial_args
-        self.shape = jax.eval_shape(self.f, *partial_args, *args)
+        abstract_args = jax.tree.map(jax.core.get_aval, partial_args + args)
+        with jax.check_tracer_leaks():
+            pass
+        self.shape = jax.eval_shape(self.f, *abstract_args)
         self.structure = jax.tree.structure(self.shape)
         self.abstract_value = list(
             map(jax.core.get_aval, jax.tree.flatten(self.shape)[0])
         )
 
         # with jax.check_tracer_leaks():
-        self.mj = self.make_jaxpr(g.f, partial_args + args)
+        self.jaxpr = self.make_jaxpr(g.f, partial_args + args)
         self.multiple_results = self.structure.num_leaves > 1
 
     def abstract(self, *args, **_kwargs):
@@ -216,14 +211,14 @@ class GF[R](GFI[R]):
         constraint: Constraint,
     ) -> dict:
         return Simulate(key, address, constraint).run(
-            self.mj.jaxpr, self.partial_args + arg_tuple, self.mj.out_tree
+            self.jaxpr, self.partial_args + arg_tuple, self.structure
         )
 
     def assess_p(
         self, arg_tuple: tuple, constraint: Constraint, address
     ) -> tuple[Float, R]:
         a = Assess[R](address, constraint)
-        retval = a.run(self.mj.jaxpr, self.partial_args + arg_tuple, self.mj.out_tree)
+        retval = a.run(self.jaxpr, self.partial_args + arg_tuple, self.structure)
         return a.score, retval
 
     def get_args(self) -> tuple:
@@ -446,14 +441,18 @@ def Cond(tf, ff):
 
     return ctor
 
+# I'm running out of good ideas.
+# Maybe we want to move the creation of the 
+# GFI to a lower level than here?
 
 class ScanGF[R](GFI[tuple[R, Any]]):
     def __init__(self, g: Gen, arg_tuple: tuple):
+        super().__init__(f"ScanGF[{g.get_name()}]")
+        self.g = g
         self.arg_tuple = arg_tuple
-        fixed_args = (arg_tuple[0], jax.tree.map(lambda v: v[0], arg_tuple[1]))
-        self.gfi = g(*fixed_args)
-        super().__init__(f"ScanGF[{self.gfi.name}]")
-        self.multiple_results = self.gfi.multiple_results
+        #self.gfi = g(*fixed_args)
+        #self.multiple_results = self.gfi.multiple_results
+        self.multiple_results = True
 
     def abstract(self, *args, **kwargs):
         return self.gfi.abstract(*args, **kwargs)
@@ -465,10 +464,12 @@ class ScanGF[R](GFI[tuple[R, Any]]):
         address: tuple[str, ...],
         constraint: Constraint,
     ) -> dict:
+        fixed_args = (arg_tuple[0], jax.tree.map(lambda v: v[0], arg_tuple[1]))
+        gfi = self.g(*fixed_args)
         def step(carry_key, s):
             carry, key = carry_key
             key, k1 = KeySplit.bind(key, a="scan_step")
-            v = self.gfi.simulate_p(k1, (carry, s), address, constraint)
+            v = gfi.simulate_p(k1, (carry, s), address, constraint)
             return (v["retval"][0], key), v
 
         print(f"simulate_p with arg_tuple {arg_tuple}")
