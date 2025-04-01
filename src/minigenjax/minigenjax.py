@@ -140,7 +140,7 @@ class Gen[R]:
 
     def __call__(self, *args):
         if self.impl is None:
-            return GF(self, args, partial_args=self.partial_args)
+            return GFA(self.f, args, partial_args=self.partial_args)
         return self.impl(*args)
 
     def repeat(self, n):
@@ -169,6 +169,64 @@ class Gen[R]:
 
     def partial(self, *args):
         return Gen(self.f, self.impl, self.partial_args + args)
+
+class GFA[R]:
+    def __init__(self, f, args, partial_args):
+        self.f = f
+        self.name = self.f.__name__
+        self.args = args
+        self.partial_args = partial_args
+
+    def simulate(self, key: PRNGKeyArray):
+        return GFB(self.f).simulate_p(key, self.partial_args + self.args, (), {})
+
+    def assess(self, constraint) -> tuple[Array, Array]:
+        return GFB(self.f).assess_p(self.partial_args + self.args, constraint, ())
+
+    def propose(self, key: PRNGKeyArray) -> tuple[Constraint, Float, R]:
+        tr = self.simulate(key)
+        return to_constraint(tr), to_score(tr), tr["retval"]
+
+    def __matmul__(self, address: str):
+        flat_args, in_tree = jax.tree.flatten(self.args + self.partial_args)
+        return GFB(self.f).bind(*flat_args, at=address, in_tree=in_tree)
+
+class GFB[R](GenPrimitive):
+    def __init__(self, f):
+        super().__init__(f'GFB[{f.__name__}]')
+        self.f = f
+        self.multiple_results=True
+
+    # def concrete(self, *args, **kwargs):
+    #     return self.f(*args)
+
+    # def abstract(self, *args, **kwargs):
+    #     return jax.core.get_aval()
+    #         jax.eval_shape(lambda args: self.concrete(*args, **kwargs), args)
+    #     )
+    
+    def simulate_p(
+        self,
+        key: PRNGKeyArray,
+        arg_tuple: tuple,
+        address: Address,
+        constraint: Constraint,
+    ) -> dict:
+        j, shape = jax.make_jaxpr(self.f, return_shape=True)(*arg_tuple)
+        structure = jax.tree.structure(shape)
+        return Simulate(key, address, constraint).run(
+            j, arg_tuple, structure
+        )
+
+    def assess_p(
+        self, arg_tuple: tuple, constraint: Constraint, address
+    ) -> tuple[Float, R]:
+        j, shape = jax.make_jaxpr(self.f, return_shape=True)(*arg_tuple)
+        structure = jax.tree.structure(shape)
+        a = Assess[R](address, constraint)
+        retval = a.run(j, arg_tuple, structure)
+        return a.score, retval
+
 
 
 class GF[R](GFI[R]):
@@ -375,10 +433,12 @@ class Simulate(Transformation[dict]):
     def handle_eqn(self, eqn: jx.core.JaxprEqn, params, bind_params):
         if isinstance(eqn.primitive, GenPrimitive):
             at = bind_params["at"]
+            if in_tree := bind_params.get("in_tree"):
+                params = jax.tree.unflatten(in_tree, params)
             addr = self.address + (at,)
             ans = eqn.primitive.simulate_p(
                 self.get_sub_key(),
-                eqn.primitive.unflatten(params),
+                params,
                 addr,
                 self.get_sub_constraint(at),
             )
