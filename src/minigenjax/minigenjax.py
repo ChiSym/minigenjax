@@ -255,8 +255,8 @@ class RepeatA[R](GFA):
     # def simulate(self, key: PRNGKeyArray):
     #     return self.get_impl().simulate_p(key, self.arg_tuple, (), {})
 
-    def __matmul__(self, address: str):
-        return self.get_impl().bind(*self.gfa.partial_args + self.gfa.args, at=address)
+    # def __matmul__(self, address: str):
+    #     return self.get_impl().bind(*self.gfa.partial_args + self.gfa.args, at=address)
 
     def get_args(self):
         return self.arg_tuple
@@ -272,11 +272,16 @@ class MapA[R](GFA):
     def get_impl(self):
         return MapGF(self.inner, self.g)
 
-    # def simulate(self, key: PRNGKeyArray):
-    #     return self.get_impl().simulate_p(key, self.arg_tuple, (), {})
-
     def get_args(self):
         return self.arg_tuple
+    
+    def __matmul__(self, address: str):
+        return self.g(self.inner @ address)
+    
+    # def simulate(self, key: PRNGKeyArray):
+    #     tr = self.inner.simulate(key)
+    #     tr['retval'] = self.g(tr['retval'])
+    #     return tr
 
 
 class VmapA[R](GFA):
@@ -315,8 +320,8 @@ class VmapA[R](GFA):
     # def simulate(self, key: PRNGKeyArray):
     #     return self.get_impl().simulate_p(key, self.arg_tuple, (), {})
 
-    def __matmul__(self, address: str):
-        return self.get_impl().bind(*self.inner.get_args(), at=address)
+    # def __matmul__(self, address: str):
+    #     return self.get_impl().bind(*self.inner.get_args(), at=address)
 
     def get_args(self):
         return self.arg_tuple
@@ -826,25 +831,14 @@ class VmapGF[R](GenPrimitive):
 
 
 class MapGF[R, S](GenPrimitive):
-    def __init__(self, inner: GFI[R], f: Callable[[R], S]):
-        super().__init__(f"Map[{inner.name}, {f.__name__}]")
+    def __init__(self, inner: GFA[R], g: Callable[[R], S]):
+        super().__init__(f"Map[{inner.name}, {g.__name__}]")
         self.inner = inner
-        self.f = f
-        self.multiple_results = False
-        # self.structure = jax.tree.structure(
-        #     jax.eval_shape(
-        #         lambda *args: self.f(self.gfi.concrete(*args)), *self.gfi.get_args()
-        #     )
-        # )
+        self.g = g
 
     def abstract(self, *args, **kwargs):
         ia = self.inner.abstract(*args, **kwargs)
-        return ia
-
-    # def abstract(self, *args, **kwargs):
-    #     # this can't be right: what about the effect of f? Why isn't it
-    #     # sufficient to apply f to a tracer to compose the abstraction?
-    #     return self.gfi.abstract(*args, **kwargs)
+        return self.g(ia)
 
     def simulate_p(
         self,
@@ -854,8 +848,9 @@ class MapGF[R, S](GenPrimitive):
         constraint: Constraint,
     ) -> dict:
         out = self.inner.get_impl().simulate_p(key, arg_tuple, address, constraint)
-        out["retval"] = self.f(out["retval"])
+        out["retval"] = self.g(out["retval"])
         return out
+
 
 
 # %%
