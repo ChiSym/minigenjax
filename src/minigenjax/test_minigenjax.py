@@ -485,11 +485,21 @@ class TestCurve:
         points = jnp.arange(-3, 4) / 10.0
 
         tr = quadratic().simulate(key0)
-        assert type(tr["retval"]) is Poly
+        assert isinstance(tr["retval"], Poly)
 
         tr = quadratic.repeat(n=3)().simulate(key0)
-        assert type(tr["retval"]) is Poly
+        assert isinstance(tr["retval"], Poly)
 
+        @Gen
+        def one_model(x):
+            poly = quadratic() @ "p"
+            return poly(x)
+        
+        print(jax.make_jaxpr(one_model(0.0).simulate)(key0))
+        
+        tr = one_model(0.0).simulate(key0)
+        assert tr["retval"] == 1.1188384
+        assert isinstance(tr["subtraces"]["p"]["retval"], Poly)
 
         # curve_model(f, x, p_outlier, sigma_inlier)
         @Gen
