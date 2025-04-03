@@ -77,8 +77,8 @@ key0 = jax.random.key(0)
 
 
 def test_pytree():
-    poly = coefficient().repeat(3).map(Poly)
-    tr = poly.simulate(key0)
+    poly = coefficient.repeat(3).map(Poly)
+    tr = poly().simulate(key0)
     p = tr["retval"]
     assert jnp.allclose(p.coefficients, jnp.array([1.1188384, 0.5781488, 0.8535516]))
 
@@ -99,7 +99,7 @@ def test_pytree():
 
     @Gen
     def wrap_poly():
-        p = poly @ "p"
+        p = poly() @ "p"
         return p
 
     tr = jax.jit(wrap_poly().simulate)(key0)
@@ -107,7 +107,7 @@ def test_pytree():
 
     @Gen
     def wrap_poly2():
-        cs = coefficient().repeat(3) @ "cs"
+        cs = coefficient.repeat(3)() @ "cs"
         return Poly(cs)
 
     tr = jax.jit(wrap_poly2().simulate)(key0)
@@ -115,8 +115,8 @@ def test_pytree():
 
 
 def test_pytree_iteration():
-    poly = coefficient().repeat(3).map(Poly)
-    tr = jax.vmap(poly.simulate)(jax.random.split(key0, 100))
+    poly = coefficient.repeat(3).map(Poly)
+    tr = jax.vmap(poly().simulate)(jax.random.split(key0, 100))
     ps = tr["retval"]
     # switch from plural Poly to list of Polys
     list_of_p = [p for p in ps]
@@ -187,7 +187,7 @@ def test_logit_vs_probs():
 
 
 def test_model_vmap():
-    tr = jax.vmap(model3(50.0).map(sum).simulate)(jax.random.split(key0, 5))
+    tr = jax.vmap(model3.map(sum)(50.0).simulate)(jax.random.split(key0, 5))
     assert jnp.allclose(
         tr["retval"], jnp.array([76.4031, 76.777, 75.255844, 76.623726, 76.145515])
     )
@@ -481,13 +481,20 @@ class TestCurve:
         assert jnp.allclose(tr["retval"], jnp.array([0.9980389, 0.91635126, 1.0424924]))
 
     def test_curve_generation(self):
-        quadratic = coefficient().repeat(3).map(Poly)
+        quadratic = coefficient.repeat(3).map(Poly)
         points = jnp.arange(-3, 4) / 10.0
+
+        tr = quadratic().simulate(key0)
+        assert type(tr["retval"]) is Poly
+
+        tr = quadratic.repeat(n=3)().simulate(key0)
+        assert type(tr["retval"]) is Poly
+
 
         # curve_model(f, x, p_outlier, sigma_inlier)
         @Gen
         def model(xs):
-            poly = quadratic @ "p"
+            poly = quadratic() @ "p"
             p_outlier = Uniform(0.0, 1.0) @ "p_outlier"
             sigma_inlier = Uniform(0.0, 0.3) @ "sigma_inlier"
             return (
@@ -550,7 +557,7 @@ def test_map_vmap():
     def plus5(x):
         return x + 5.0
 
-    noisy_plus5 = noisy(10.0).map(plus5)
+    noisy_plus5 = noisy.map(plus5)(10.0)
     tr = jax.vmap(noisy_plus5.simulate)(jax.random.split(key0, 3))
     assert jnp.allclose(tr["retval"], jnp.array([15.0111885, 15.005781, 15.008535]))
 
@@ -680,17 +687,17 @@ def test_map_of_repeat():
     def coefficient():
         return Normal(0.0, 1.0) @ "c"
 
-    pg = coefficient().repeat(3).map(Poly)
+    pg = coefficient.repeat(3).map(Poly)
 
-    tr = pg.simulate(key0)
+    tr = pg().simulate(key0)
     assert jnp.allclose(
         tr["retval"].coefficients, jnp.array([1.1188384, 0.5781488, 0.8535516])
     )
     assert jnp.allclose(tr["retval"](1.0), jnp.array(2.5505388))
     assert jnp.allclose(tr["retval"](2.0), jnp.array(5.6893425))
 
-    kg = coefficient().repeat(3).map(jnp.sum)
-    tr = kg.simulate(key0)
+    kg = coefficient.repeat(3).map(jnp.sum)
+    tr = kg().simulate(key0)
     assert jnp.allclose(tr["retval"], jnp.array(2.5505388))
 
 
@@ -708,7 +715,7 @@ def test_repeat_of_map():
 
 
 def test_repeat_of_cond():
-    repeated_model = cond_model(60.0).repeat(5)
+    repeated_model = cond_model.repeat(5)(60.0)
     tr = repeated_model.simulate(key0)
     assert jnp.allclose(
         tr["retval"], jnp.array([60.057796, 31.760138, 30.233942, 31.401255, 60.03401])
@@ -870,7 +877,7 @@ def test_assess_repeat():
     def m(a):
         return Normal(a, 1.0) @ "x"
 
-    w, _ = m(10.0).repeat(4).assess({"x": 10.0 + 0.1 * jnp.ones(4)})
+    w, _ = m.repeat(4)(10.0).assess({"x": 10.0 + 0.1 * jnp.ones(4)})
     assert w == -3.6957543
 
 
@@ -929,7 +936,7 @@ def test_repeat_importance():
         b = Normal(z, 1.0) @ "b"
         return a + b
 
-    mr = model(1.0).repeat(4)
+    mr = model.repeat(4)(1.0)
     mr_imp = jax.jit(mr.importance)
     values = jnp.arange(4) / 10.0
     tr, w = mr_imp(key0, {"a": values})
