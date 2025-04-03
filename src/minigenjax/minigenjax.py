@@ -85,48 +85,22 @@ class GenPrimitive(jx.core.Primitive):
 InAxesT = int | Sequence[Any] | None
 
 
-class GFI[R](GenPrimitive):
+class GFI[R]:
     def __init__(self, name):
-        super().__init__(name)
+        self.name = name
 
     def simulate(self, key: PRNGKeyArray) -> dict:
-        return self.simulate_p(key, self.get_args(), (), {})
+        raise NotImplementedError(f"simulate: {self}")
 
     def propose(self, key: PRNGKeyArray) -> tuple[Constraint, Float, R]:
         tr = self.simulate(key)
         return to_constraint(tr), to_score(tr), tr["retval"]
 
-    def importance(
-        self, key: PRNGKeyArray, constraint: Constraint
-    ) -> tuple[dict, Float]:
-        tr = self.simulate_p(key, self.get_args(), (), constraint)
-        return tr, to_weight(tr)
+    def importance(self, key: PRNGKeyArray, constraint: Constraint) -> dict:
+        raise NotImplementedError(f"importance: {self}")
 
     def assess(self, constraint) -> tuple[Array, Array]:
-        return self.assess_p(self.get_args(), constraint, ())
-
-    def map[S](self, f: Callable[[R], S]) -> "MapGF[R,S]":
-        return MapGF(self, f)
-
-    def get_structure(self) -> jax.tree_util.PyTreeDef:
-        raise NotImplementedError(f"get_structure: {self}")
-
-    def __matmul__(self, address: str):
-        r = self.bind(*jax.tree.flatten(self.get_args())[0], at=address)
-        return jax.tree.unflatten(
-            self.get_structure(), r if self.multiple_results else [r]
-        )
-
-    @staticmethod
-    def make_jaxpr(f, arg_tuple) -> ClosedJaxpr:
-        jaxpr = jax.make_jaxpr(f)(
-            *jax.tree.map(jax.core.get_aval, arg_tuple)
-        )
-        return jaxpr
-
-
-GenSymT = Callable[[jax.core.AbstractValue], jx.core.Var]
-
+        raise NotImplementedError(f"assess: {self}")
 
 # %%
 class Gen[R]:
@@ -145,13 +119,13 @@ class Gen[R]:
 
     def repeat(self, n):
         def impl(*args):
-            return RepeatGF(self(*args), n)
+            return RepeatA(self(*args), n)
 
         return Gen(self.f, impl=impl)
 
     def vmap(self, in_axes: InAxesT = 0):
         def impl(*args):
-            return VmapGF(self, args, in_axes)
+            return VmapA(self, args, in_axes)
 
         return Gen(self.f, impl=impl)
 
@@ -169,6 +143,9 @@ class Gen[R]:
 
     def partial(self, *args):
         return Gen(self.f, self.impl, self.partial_args + args)
+    
+
+# gfb is sort of the "final form" 
 
 class GFA[R]:
     def __init__(self, f, args, partial_args):
@@ -177,19 +154,88 @@ class GFA[R]:
         self.args = args
         self.partial_args = partial_args
 
+    def get_impl(self):
+        return GFB(self.f)
+    
     def simulate(self, key: PRNGKeyArray):
-        return GFB(self.f).simulate_p(key, self.partial_args + self.args, (), {})
+        return self.get_impl().simulate_p(key, self.get_args(), (), {})
 
     def assess(self, constraint) -> tuple[Array, Array]:
-        return GFB(self.f).assess_p(self.partial_args + self.args, constraint, ())
+        return self.get_impl().assess_p(self.get_args(), constraint, ())
 
-    def propose(self, key: PRNGKeyArray) -> tuple[Constraint, Float, R]:
-        tr = self.simulate(key)
-        return to_constraint(tr), to_score(tr), tr["retval"]
-
+    def importance(self, key: PRNGKeyArray, constraint: Constraint):
+        return self.get_impl().simulate_p(key, self.get_args(), (), constraint)
+        
     def __matmul__(self, address: str):
         flat_args, in_tree = jax.tree.flatten(self.args + self.partial_args)
-        return GFB(self.f).bind(*flat_args, at=address, in_tree=in_tree)
+        return self.get_impl().bind(*flat_args, at=address, in_tree=in_tree)
+    
+    def abstract(self, *args, **kwargs):
+        return self.get_impl().abstract(*args, **kwargs)
+    
+    def get_args(self):
+        return self.partial_args + self.args
+    
+class RepeatA[R](GFA):
+    def __init__(self, gfa: GFA[R], n: int):
+        self.gfa = gfa
+        self.name = self.gfa.name
+        self.n = n
+
+    def get_impl(self):
+        return RepeatGF(self.gfa, self.n)
+        
+    def simulate(self, key: PRNGKeyArray):
+        return self.get_impl().simulate_p(key, self.gfa.partial_args + self.gfa.args, (), {})
+
+    def __matmul__(self, address: str):
+        return self.get_impl().bind(*self.gfa.partial_args + self.gfa.args, at=address)  
+      
+
+class VmapA[R]:
+    def __init__(self, gen: Gen, args: tuple, in_axes: InAxesT):
+        self.gen = gen
+        self.args = args
+        self.in_axes = in_axes
+
+        # find one pair of (parameter number, axis) to use to determine size of vmap
+        if isinstance(self.in_axes, tuple):
+            self.p_index, self.an_axis = next(
+                filter(lambda b: b[1] is not None, enumerate(self.in_axes))
+            )
+        else:
+            self.p_index, self.an_axis = 0, self.in_axes
+        self.n = args[self.p_index].shape[self.an_axis]
+        
+    def simulate(self, key: PRNGKeyArray):
+        gfa = self.gen(*self.args)
+        return VMapB(gfa, self.n, self.in_axes).simulate_p(key, gfa.partial_args + gfa.args, (), {})
+
+    def __matmul__(self, address: str):
+        return VmapB(self.gfa, n).bind(*self.gfa.partial_args + self.gfa.args, at=address)    
+
+
+class VMapB:
+    def __init__(self, inner, n, in_axes):
+        self.inner = inner
+        self.n = n
+        self.in_axes = in_axes
+
+    def simulate_p(
+        self,
+        key: PRNGKeyArray,
+        arg_tuple: tuple,
+        address: Address,
+        constraint: Constraint,
+    ) -> dict:
+        return jax.vmap(lambda key, constraint, arg_tuple: self.inner.get_impl().simulate_p(key, arg_tuple, address, constraint), in_axes=(0, 0, self.in_axes))(jax.random.split(key, self.n), constraint, arg_tuple)
+
+    def abstract(self, *args, **kwargs):
+        ia = self.inner.abstract(*args, **kwargs)
+        return ia.update(shape=(self.n,) + ia.shape)
+
+
+
 
 class GFB[R](GenPrimitive):
     def __init__(self, f):
@@ -197,13 +243,13 @@ class GFB[R](GenPrimitive):
         self.f = f
         self.multiple_results=True
 
-    # def concrete(self, *args, **kwargs):
-    #     return self.f(*args)
+    def concrete(self, *args, **kwargs):
+        return self.f(*args)
 
-    # def abstract(self, *args, **kwargs):
-    #     return jax.core.get_aval()
-    #         jax.eval_shape(lambda args: self.concrete(*args, **kwargs), args)
-    #     )
+    def abstract(self, *args, **kwargs):
+        return jax.core.get_aval(
+            jax.eval_shape(lambda args: self.concrete(*args, **kwargs), args)
+        )
     
     def simulate_p(
         self,
@@ -227,6 +273,27 @@ class GFB[R](GenPrimitive):
         retval = a.run(j, arg_tuple, structure)
         return a.score, retval
 
+class RepeatGF[R](GenPrimitive):
+    SUB_TRACE = "__repeat"
+
+    def __init__(self, inner: GFA[R], n: int):
+        name = f"RepeatGF[{n}, {inner.name}]"
+        super().__init__(name)
+        self.n = n
+        self.inner = inner
+
+    def simulate_p(
+        self,
+        key: PRNGKeyArray,
+        arg_tuple: tuple,
+        address: Address,
+        constraint: Constraint,
+    ) -> dict:
+        return jax.vmap(lambda key, constraint: self.inner.get_impl().simulate_p(key, arg_tuple, address, constraint))(jax.random.split(key, self.n), constraint)
+
+    def abstract(self, *args, **kwargs):
+        ia = self.inner.abstract(*args, **kwargs)
+        return ia.update(shape=(self.n,) + ia.shape)
 
 
 class GF[R](GFI[R]):
@@ -547,55 +614,6 @@ class ScanGF[R](GFI[tuple[R, Any]]):
 
     def unflatten(self, flat_args):
         return self.gfi.unflatten(flat_args)
-
-
-class RepeatGF[R](GFI[R]):
-    SUB_TRACE = "__repeat"
-
-    def __init__(self, gfi: GFI[R], n: int):
-        super().__init__(f"RepeatGF[{n}, {gfi.name}]")
-        self.n = n
-        self.gfi = gfi
-
-    def abstract(self, *args, **kwargs):
-        return self.inflate(self.gfi.abstract(*args, **kwargs), self.n)
-
-    def concrete(self, *args, **kwargs):
-        return jax.vmap(lambda _: self.gfi.concrete(*args, **kwargs))(
-            jnp.arange(self.n)
-        )
-
-    def simulate_p(
-        self,
-        key: PRNGKeyArray,
-        arg_tuple: tuple,
-        address: Address,
-        constraint: Constraint,
-    ) -> dict:
-        def repeat_inner(key, constraint):
-            return self.gfi.simulate_p(key, arg_tuple, address, constraint)
-
-        return jax.vmap(repeat_inner, in_axes=(0, 0))(
-            jax.random.split(key, self.n), constraint
-        )
-
-    def assess_p(
-        self, arg_tuple: tuple, constraint: Constraint, address: tuple[str, ...]
-    ) -> Float:
-        def vmap_inner(constraint):
-            return self.gfi.assess_p(arg_tuple, constraint, address)
-
-        score, retval = jax.vmap(vmap_inner)(constraint)
-        return jnp.sum(score), retval
-
-    def unflatten(self, flat_args):
-        return self.gfi.unflatten(flat_args)
-
-    def get_structure(self):
-        return self.gfi.get_structure()
-
-    def get_args(self) -> tuple:
-        return self.gfi.get_args()
 
 
 class VmapGF[R](GFI[R]):
