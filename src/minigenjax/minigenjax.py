@@ -78,9 +78,6 @@ class GenPrimitive(jx.core.Primitive):
 
         return jax.tree.map(inflate_one, v)
 
-    def unflatten(self, flat_args):
-        raise NotImplementedError(f"unflatten: {self}")
-
 
 InAxesT = int | Sequence[Any] | None
 
@@ -492,8 +489,6 @@ class GF[R](GFI[R]):
     def get_structure(self) -> jax.tree_util.PyTreeDef:
         return self.structure
 
-    def unflatten(self, flat_args) -> jax.tree_util.PyTreeDef:
-        return jax.tree.unflatten(self.in_tree, flat_args)
 
 
 class Transformation[R]:
@@ -752,8 +747,6 @@ class ScanGF[R](GenPrimitive):
     def get_structure(self) -> PyTreeDef:
         return self.gfi.get_structure()
 
-    def unflatten(self, flat_args):
-        return self.gfi.unflatten(flat_args)
 
 
 class VmapGF[R](GenPrimitive):
