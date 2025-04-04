@@ -24,7 +24,7 @@ class IterablePytree:
 def pytree(cls: type) -> type:
     T = type(
         cls.__name__,
-        (IterablePytree, dataclasses.dataclass(cls)),
+        (IterablePytree, dataclasses.dataclass(frozen=True)(cls)),
         {
             "attributes_dict": lambda self: {
                 field.name: getattr(self, field.name)
