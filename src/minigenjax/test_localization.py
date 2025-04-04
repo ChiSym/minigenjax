@@ -89,8 +89,10 @@ def test_localization():
     )
 
     key, sub_key = jax.random.split(key)
-    some_pose = whole_map_prior.simulate(key)["retval"]
-
+    some_pose = whole_map_prior.simulate(sub_key)["retval"]
+    tr = jax.jit(whole_map_prior.simulate)(sub_key)
+    assert jnp.allclose(some_pose.hd, tr["retval"].hd)
+    assert jnp.allclose(some_pose.p, tr["retval"].p)
     sensor_model = sensor_model_one.vmap(in_axes=(None, 0, None))
 
     key, sub_key = jax.random.split(key)
@@ -99,28 +101,28 @@ def test_localization():
         tr["retval"],
         jnp.array(
             [
-                0.67065454,
-                0.581487,
-                0.8832029,
-                1.3153447,
-                1.072247,
-                1.0493912,
-                1.3886665,
-                1.5973471,
-                1.4577864,
-                1.5266284,
-                1.4897541,
-                1.6672342,
-                1.1514298,
-                0.7201601,
-                0.89109415,
-                0.9212124,
-                0.88611394,
-                0.786982,
-                0.6631653,
-                0.48975345,
-                0.70259863,
-            ]
+                1.8319645,
+                1.8249748,
+                2.3729553,
+                2.1042943,
+                1.7308967,
+                1.3865273,
+                0.5385731,
+                0.15848322,
+                0.23405387,
+                0.3614612,
+                0.26093096,
+                0.38295925,
+                0.36778474,
+                0.06698091,
+                0.25884473,
+                0.24397819,
+                0.15396227,
+                0.4171125,
+                0.643867,
+                1.6671362,
+                1.8732764,
+            ],
         ),
     )
 
