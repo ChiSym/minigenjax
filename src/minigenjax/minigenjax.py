@@ -702,7 +702,7 @@ def Cond(tf, ff):
                 )
 
             def simulate(self, key: PRNGKeyArray):
-                return GF(Gen(lambda: self @ "__cond"), ()).simulate(key)
+                return Gen(lambda: self @ "__cond")().simulate(key)
 
         return Binder()
 
