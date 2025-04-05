@@ -452,6 +452,24 @@ def test_plain_scan():
     assert tr["subtraces"]["init"]["retval"] == 9.997942
 
 
+def test_scan_map():
+    @Gen
+    def model(step, update):
+        return step + Normal(0.0, update) @ 's'
+    
+    def diag(r):
+        return r+1.0, r
+
+    tr = model.map(diag)(10.0, 0.01).simulate(key0)
+    assert tr["retval"] == (10.997942, 9.997942)
+
+    tr = model.map(diag).scan()(1.0, jnp.ones(3) * 0.01).simulate(key0)
+    assert tr['retval'][0] == 3.986483
+    assert jnp.allclose(
+        tr['retval'][1],
+         jnp.array([1.9874847, 2.9816182, 3.986483])
+    )
+
 class TestCurve:
     def test_curve_model(self):
         f = Poly(jnp.array([1.0, -1.0, 2.0]))  # x**2.0 - x + 1.0

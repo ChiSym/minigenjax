@@ -225,11 +225,31 @@ def test_localization():
         return pose
 
     key, sub_key = jax.random.split(key)
-    tr = full_model_kernel(motion_settings, sensor_noise, some_pose, Control(ds=0.5, dhd=0.0)).simulate(sub_key)
-    print('fmk', tr)
+    tr = full_model_kernel(
+        motion_settings, sensor_noise, some_pose, Control(ds=0.5, dhd=0.0)
+    ).simulate(sub_key)
+    print("fmk1", tr)
+
+    tr = full_model_kernel.partial(motion_settings, sensor_noise)(
+        some_pose, Control(ds=0.5, dhd=0.0)
+    ).simulate(sub_key)
+    print("fmk2", tr)
 
     def diag(x):
         return (x, x)
+
+    tr = full_model_kernel.partial(motion_settings, sensor_noise).map(diag)(
+        some_pose, Control(ds=0.5, dhd=0.0)
+    ).simulate(sub_key)
+    print("fmk3", tr)
+
+    tr = (
+        full_model_kernel.partial(motion_settings, sensor_noise)
+        .map(diag)
+        .scan()(some_pose, Control(ds=jnp.array([0.5, 0.2]), dhd=jnp.array([0.0, 0.0])))
+        .simulate(sub_key)
+    )
+    print("fmk4", tr)
 
     @Gen
     def full_model(motion_settings, sensor_noise):
@@ -242,5 +262,5 @@ def test_localization():
 
     key, sub_key = jax.random.split(key)
 
-    #tr = full_model(motion_settings, sensor_noise).simulate(sub_key)
-    #print('fm', tr)
+    # tr = full_model(motion_settings, sensor_noise).simulate(sub_key)
+    # print('fm', tr)
