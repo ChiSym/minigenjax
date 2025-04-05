@@ -1660,14 +1660,17 @@ def update_confidence_circle(widget, _):
 
 
 # %%
-@mg.Gen
 def path_model(motion_settings):
     @mg.Gen
-    def step(start, control):
-        s = step_model(motion_settings, start, control) @ "step"
-        return s, s
+    def path_model_inner():
+        @mg.Gen
+        def step(start, control):
+            s = step_model(motion_settings, start, control) @ "step"
+            return s, s
 
-    return step.scan(robot_inputs["start"], robot_inputs["controls"]) @ "steps"
+        return step.scan()(robot_inputs["start"], robot_inputs["controls"]) @ "steps"
+    
+    return path_model_inner()
 
 
 # %% [markdown]
@@ -1675,6 +1678,7 @@ def path_model(motion_settings):
 
 # %%
 key, sub_key = jax.random.split(key)
+#path_model(model_motion_settings).propose(sub_key)
 path_model(model_motion_settings).propose(sub_key)
 # %%
 
@@ -1698,8 +1702,8 @@ def plot_path_with_confidence(path, step):
     )
 
 
-key, sample_key = jax.random.split(key)q
-path = path_model.propose(sample_key, (model_motion_settings,))[2][1]
+key, sample_key = jax.random.split(key)
+path = path_model(model_motion_settings).propose(sample_key)[2][1]
 Plot.Frames(
     [
         plot_path_with_confidence(path, step) + Plot.title("Motion model (samples)")
@@ -1716,7 +1720,7 @@ N_samples = 12
 
 key, sub_key = jax.random.split(key)
 sample_paths = jax.vmap(
-    lambda k: path_model.propose(k, (model_motion_settings,))[2][1]
+    lambda k: path_model(model_motion_settings).propose(k)[2][1]
 )(jax.random.split(sub_key, N_samples))
 
 Plot.html(
@@ -1737,19 +1741,19 @@ Plot.html(
 
 
 # %%
-@genjax.gen
+@mg.Gen
 def full_model_kernel(motion_settings, sensor_noise, state, control):
     pose = step_model(motion_settings, state, control) @ "pose"
     sensor_model(pose, sensor_angles, sensor_noise) @ "sensor"
     return pose
 
 
-@genjax.gen
+@mg.Gen
 def full_model(motion_settings, sensor_noise):
     return (
-        full_model_kernel.partial_apply(motion_settings, sensor_noise)
+        full_model_kernel.partial(motion_settings, sensor_noise)
         .map(diag)
-        .scan(robot_inputs["start"], robot_inputs["controls"])
+        .scan()(robot_inputs["start"], robot_inputs["controls"])
         @ "steps"
     )
 
@@ -1766,8 +1770,8 @@ def full_model(motion_settings, sensor_noise):
 
 # %%
 key, sub_key = jax.random.split(key)
-cm, score, retval = full_model.propose(
-    sub_key, (model_motion_settings, model_sensor_noise)
+cm, score, retval = full_model(model_motion_settings, model_sensor_noise).propose(
+    sub_key
 )
 cm
 

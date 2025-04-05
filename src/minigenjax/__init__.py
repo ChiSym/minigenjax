@@ -1,4 +1,4 @@
-from .minigenjax import (
+from .core import (
     Gen,
     Cond,
     MissingConstraint,
