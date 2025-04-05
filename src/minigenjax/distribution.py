@@ -1,5 +1,5 @@
 import functools
-from . import minigenjax as mg
+import minigenjax.core as mg
 import jax
 import jax.core
 from jax.interpreters import mlir

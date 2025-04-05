@@ -177,16 +177,16 @@ def test_localization():
         dhd: Array
 
     robot_inputs = {
-        "start": some_pose,
+        "start": Pose(jnp.zeros(2), jnp.array(0.0)),
         "controls": Control(
             ds=jnp.array([0.1, 0.2, 0.2]), dhd=jnp.array([0.3, -0.4, 0.1])
         ),
     }
 
-    motion_settings = {"p_noise": 0.05, "hd_noise": 0.06}
+    motion_settings = {"p_noise": 0.05, "hd_noise": 0.001}
 
     @Gen
-    def path_model(motion_settings):
+    def path_model():
         @Gen
         def step(motion_settings, start, control):
             s = step_model(motion_settings, start, control) @ "step"
@@ -200,5 +200,47 @@ def test_localization():
         )
 
     key, sub_key = jax.random.split(key)
-    tr = path_model(motion_settings).simulate(sub_key)
-    assert tr["retval"] == 999.0
+    tr = path_model().simulate(sub_key)
+    assert jnp.allclose(tr["retval"][0].p, jnp.array([0.49113017, -0.06636977]))
+    assert jnp.allclose(tr["retval"][0].hd, jnp.array(-0.00270242))
+    assert jnp.allclose(
+        tr["retval"][1].p,
+        jnp.array(
+            [
+                [0.07681607, 0.01898071],
+                [0.3164358, -0.00072752],
+                [0.49113017, -0.06636977],
+            ]
+        ),
+    )
+    assert jnp.allclose(
+        tr["retval"][1].hd,
+        jnp.array([0.29812962, -0.10176747, -0.00270242]),
+    )
+
+    @Gen
+    def full_model_kernel(motion_settings, sensor_noise, state, control):
+        pose = step_model(motion_settings, state, control) @ "pose"
+        _ = sensor_model(pose, sensor_angles, sensor_noise) @ "sensor"
+        return pose
+
+    key, sub_key = jax.random.split(key)
+    tr = full_model_kernel(motion_settings, sensor_noise, some_pose, Control(ds=0.5, dhd=0.0)).simulate(sub_key)
+    print('fmk', tr)
+
+    def diag(x):
+        return (x, x)
+
+    @Gen
+    def full_model(motion_settings, sensor_noise):
+        return (
+            full_model_kernel.partial(motion_settings, sensor_noise)
+            .map(diag)
+            .scan()(robot_inputs["start"], robot_inputs["controls"])
+            @ "steps"
+        )
+
+    key, sub_key = jax.random.split(key)
+
+    #tr = full_model(motion_settings, sensor_noise).simulate(sub_key)
+    #print('fm', tr)

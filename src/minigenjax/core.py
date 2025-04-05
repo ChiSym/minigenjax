@@ -8,8 +8,8 @@ import jax.tree
 import jax.api_util
 import jax.numpy as jnp
 from jax.interpreters import batching
-from .key import KeySplit
-from .trace import to_constraint, to_score, to_weight
+from minigenjax.key import KeySplit
+from minigenjax.trace import to_constraint, to_score, to_weight
 import jax.extend as jx
 import jax.core
 from jaxtyping import Array, ArrayLike, PRNGKeyArray, Float
@@ -50,9 +50,7 @@ class GenPrimitive(jx.core.Primitive):
         result = jax.vmap(lambda *args: self.impl(*args, **kwargs), in_axes=batch_axes)(
             *vector_args
         )
-        batched_axes = (
-            (batch_axes[0],) * len(result)
-        )
+        batched_axes = (batch_axes[0],) * len(result)
         return result, batched_axes
 
     def simulate_p(
@@ -126,12 +124,13 @@ class Gen[R]:
 
     def vmap(self, in_axes: InAxesT = 0):
         this = self
+
         class ToVmap(Gen):
             def __init__(self, in_axes):
                 self.in_axes = in_axes
 
             def __call__(self, *args):
-                return  VmapA(self.in_axes, args, this)
+                return VmapA(self.in_axes, args, this)
 
         return ToVmap(in_axes)
 
@@ -156,7 +155,7 @@ class Gen[R]:
 
             def __call__(self, *args):
                 return ScanA(args, this)
-            
+
         return ToScan()
 
     def partial(self, *args):
@@ -182,9 +181,9 @@ class GFA[R]:
         self.args = args
         self.partial_args = partial_args
 
-        self.shape = jax.eval_shape(f, *args)
+        # with jax.check_tracer_leaks():
+        self.shape = jax.eval_shape(f, *jax.tree.map(jax.core.get_aval, args))
         self.structure = jax.tree.structure(self.shape)
-
 
     def get_impl(self):
         return GFB(self.f, self.shape)
@@ -205,31 +204,65 @@ class GFA[R]:
 
     def __matmul__(self, address: str):
         flat_args, in_tree = jax.tree.flatten(self.get_args())
-        return jax.tree.unflatten(self.get_structure(), self.get_impl().bind(*flat_args, at=address, in_tree=in_tree))
-
+        return jax.tree.unflatten(
+            self.get_structure(),
+            self.get_impl().bind(*flat_args, at=address, in_tree=in_tree),
+        )
 
     def abstract(self, *args, **kwargs):
         return self.get_impl().abstract(*args, **kwargs)
 
     def get_args(self):
         return self.partial_args + self.args
-    
+
     def get_structure(self):
         return self.structure
-    
 
 
 class PartialA(GFA):
     def __init__(self, partial_args, args, next):
+        # TODO: make the initialization sane by extracting a base class
+        # so that GFA is not the root
         self.partial_args = partial_args
         self.args = args
         self.gfa = next(*self.partial_args, *self.args)
+        self.name = f"Partial[{self.gfa.name}]"
 
     def get_impl(self):
-        return self.gfa.get_impl()
-    
+        return PartialGF(self.partial_args, self.gfa)
+
     def get_args(self):
-        return self.partial_args + self.args
+        return self.args
+
+    def get_structure(self):
+        return self.gfa.get_structure()
+
+
+class PartialGF(GenPrimitive):
+    def __init__(self, partial_args, inner):
+        super().__init__(f"Partial[{inner.name}]")
+        self.inner_impl = inner.get_impl()
+        self.abstract_value = inner.abstract(
+            *jax.tree.flatten(partial_args + inner.get_args())
+        )
+        self.partial_args = partial_args
+        self.multiple_results = True
+
+    def simulate_p(
+        self,
+        key: PRNGKeyArray,
+        arg_tuple: tuple,
+        address: Address,
+        constraint: Constraint,
+    ) -> dict:
+        pa = self.partial_args
+        self.partial_args = ()
+        a = self.inner_impl.simulate_p(key, pa + arg_tuple, address, constraint)
+        return a
+
+    def abstract(self, *args, **kwargs):
+        return self.abstract_value
+
 
 class ScanA(GFA):
     def __init__(self, args, nxt):
@@ -244,9 +277,10 @@ class ScanA(GFA):
 
     def get_args(self):
         return self.args
-    
+
     def get_structure(self):
         return self.gfa.get_structure()
+
 
 class RepeatA[R](GFA):
     def __init__(self, n, arg_tuple, next: Gen):
@@ -257,7 +291,7 @@ class RepeatA[R](GFA):
 
     def get_impl(self):
         return RepeatGF(self.gfa, self.n)
-    
+
     def get_structure(self):
         return self.gfa.get_structure()
 
@@ -277,6 +311,9 @@ class MapA[R](GFA):
         self.arg_tuple = arg_tuple
         self.inner = next(*arg_tuple)
         self.name = f"Map[{g.__name__}, {self.inner.name}]"
+        
+        self.shape = jax.eval_shape(lambda: self.g(self.inner @ 'a'))
+        self.structure = jax.tree.structure(self.shape)
 
     def get_impl(self):
         return MapGF(self.inner, self.g)
@@ -284,9 +321,15 @@ class MapA[R](GFA):
     def get_args(self):
         return self.arg_tuple
     
+    def get_structure(self):
+        return self.structure
+    
+        # doing this short circuits the impl, so that MapGF doesn't get into the
+    # jaxpr. Fixing this would mean learning the structure that is produced by
+    # g.
     def __matmul__(self, address: str):
         return self.g(self.inner @ address)
-    
+
     # def simulate(self, key: PRNGKeyArray):
     #     tr = self.inner.simulate(key)
     #     tr['retval'] = self.g(tr['retval'])
@@ -328,15 +371,18 @@ class VmapA[R](GFA):
 
     def get_args(self):
         return self.arg_tuple
-    
+
     def get_structure(self):
         return self.inner.get_structure()
+
 
 class GFB[R](GenPrimitive):
     def __init__(self, f, shape):
         super().__init__(f"GFB[{f.__name__}]")
         self.f = f
-        self.abstract_value = jax.tree.map(jax.core.get_aval, jax.tree.flatten(shape)[0])
+        self.abstract_value = jax.tree.map(
+            jax.core.get_aval, jax.tree.flatten(shape)[0]
+        )
         self.multiple_results = True
 
     def concrete(self, *args, **kwargs):
@@ -344,7 +390,6 @@ class GFB[R](GenPrimitive):
 
     def abstract(self, *args, **kwargs):
         return self.abstract_value
-
 
     def simulate_p(
         self,
@@ -403,7 +448,6 @@ class RepeatGF[R](GenPrimitive):
     def abstract(self, *args, **kwargs):
         ia = self.inner.abstract(*args, **kwargs)
         return jax.tree.map(lambda a: a.update(shape=(self.n,) + a.shape), ia)
-
 
 
 class Transformation[R]:
@@ -508,6 +552,8 @@ class Assess[R](Transformation[R]):
         if isinstance(eqn.primitive, GenPrimitive):
             at = bind_params["at"]
             addr = self.address + (at,)
+            if in_tree := bind_params.get("in_tree"):
+                params = jax.tree.unflatten(in_tree, params)
             score, ans = eqn.primitive.assess_p(
                 params, self.get_sub_constraint(at, required=True), addr
             )
@@ -623,11 +669,13 @@ def Cond(tf, ff):
 class ScanGF[R](GenPrimitive):
     def __init__(self, inner: ScanA):
         super().__init__(f"ScanGF[{inner.name}]")
-        self.inner = inner
+        self.inner_impl = inner.get_impl()
+        # TODO: could we just compute abstract_value up front, forever?
+        self.abstract_value = inner.abstract(*jax.tree.flatten(inner.get_args()))
         self.multiple_results = True
 
     def abstract(self, *args, **kwargs):
-        return self.inner.abstract(*args, **kwargs)
+        return self.abstract_value
 
     def simulate_p(
         self,
@@ -636,13 +684,13 @@ class ScanGF[R](GenPrimitive):
         address: tuple[str, ...],
         constraint: Constraint,
     ) -> dict:
-        #fixed_args = (arg_tuple[0], jax.tree.map(lambda v: v[0], arg_tuple[1]))
-        #gfi = self.g(*fixed_args)
+        # fixed_args = (arg_tuple[0], jax.tree.map(lambda v: v[0], arg_tuple[1]))
+        # gfi = self.g(*fixed_args)
 
         def step(carry_key, s):
             carry, key = carry_key
             key, k1 = KeySplit.bind(key, a="scan_step")
-            v = self.inner.get_impl().simulate_p(k1, (carry, s), address, constraint)
+            v = self.inner_impl.simulate_p(k1, (carry, s), address, constraint)
             return (v["retval"][0], key), v
 
         print(f"simulate_p with arg_tuple {arg_tuple}")
@@ -659,12 +707,17 @@ class ScanGF[R](GenPrimitive):
         return self.gfi.get_structure()
 
 
-
 class VmapGF[R](GenPrimitive):
     def __init__(self, inner: VmapA):
-        self.inner = inner
+        # self.inner = inner
         self.name = inner.name
         self.in_axes = inner.in_axes
+        self.n = inner.n
+        av = inner.inner.abstract(*jax.tree.flatten(inner.get_args()))
+        self.abstract_value = jax.tree.map(
+            lambda a: a.update(shape=(self.n,) + a.shape), av
+        )
+        self.inner_impl = inner.inner.get_impl()
         self.multiple_results = True
         if isinstance(self.in_axes, tuple):
             self.p_index, self.an_axis = next(
@@ -675,9 +728,7 @@ class VmapGF[R](GenPrimitive):
         super().__init__(self.name)
 
     def abstract(self, *args, **kwargs):
-        ia = self.inner.inner.abstract(*args, **kwargs)
-        return jax.tree.map(lambda a: a.update(shape=(self.inner.n,) + a.shape), ia)
-
+        return self.abstract_value
 
     def simulate_p(
         self,
@@ -688,22 +739,23 @@ class VmapGF[R](GenPrimitive):
     ) -> dict:
         n = arg_tuple[self.p_index].shape[self.an_axis]
         return jax.vmap(
-            lambda key, constraint, arg_tuple: self.inner.inner.get_impl().simulate_p(
+            lambda key, constraint, arg_tuple: self.inner_impl.simulate_p(
                 key, arg_tuple, address, constraint
             ),
-            in_axes=(0, 0, self.inner.in_axes)
+            in_axes=(0, 0, self.in_axes),
         )(jax.random.split(key, n), constraint, arg_tuple)
-    
+
     def assess_p(
         self, arg_tuple: tuple, constraint: Constraint, address: tuple[str, ...]
     ) -> Float:
         def vmap_inner(constraint, params):
-            return self.inner.inner.get_impl().assess_p(params, constraint, address)
+            return self.inner_impl.assess_p(params, constraint, address)
 
         score, retval = jax.vmap(vmap_inner, in_axes=(0, self.in_axes))(
             constraint, arg_tuple
         )
         return jnp.sum(score), retval
+
 
 class MapGF[R, S](GenPrimitive):
     def __init__(self, inner: GFA[R], g: Callable[[R], S]):
@@ -725,7 +777,6 @@ class MapGF[R, S](GenPrimitive):
         out = self.inner.get_impl().simulate_p(key, arg_tuple, address, constraint)
         out["retval"] = self.g(out["retval"])
         return out
-
 
 
 # %%
