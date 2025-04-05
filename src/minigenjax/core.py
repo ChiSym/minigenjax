@@ -255,10 +255,7 @@ class PartialGF(GenPrimitive):
         address: Address,
         constraint: Constraint,
     ) -> dict:
-        pa = self.partial_args
-        self.partial_args = ()
-        a = self.inner_impl.simulate_p(key, pa + arg_tuple, address, constraint)
-        return a
+        return self.inner_impl.simulate_p(key, self.partial_args + arg_tuple, address, constraint)
 
     def abstract(self, *args, **kwargs):
         return self.abstract_value
@@ -279,6 +276,7 @@ class ScanA(GFA):
         return self.args
 
     def get_structure(self):
+        #return self.structure
         return self.gfa.get_structure()
 
 
@@ -309,14 +307,14 @@ class MapA[R](GFA):
     def __init__(self, g, arg_tuple, next):
         self.g = g
         self.arg_tuple = arg_tuple
+        _, self.in_tree = jax.tree.flatten(self.arg_tuple)
         self.inner = next(*arg_tuple)
         self.name = f"Map[{g.__name__}, {self.inner.name}]"
-        
         self.shape = jax.eval_shape(lambda: self.g(self.inner @ 'a'))
         self.structure = jax.tree.structure(self.shape)
 
     def get_impl(self):
-        return MapGF(self.inner, self.g)
+        return MapGF(self, self.g)
 
     def get_args(self):
         return self.arg_tuple
@@ -671,7 +669,7 @@ class ScanGF[R](GenPrimitive):
         super().__init__(f"ScanGF[{inner.name}]")
         self.inner_impl = inner.get_impl()
         # TODO: could we just compute abstract_value up front, forever?
-        self.abstract_value = inner.abstract(*jax.tree.flatten(inner.get_args()))
+        self.abstract_value = inner.abstract(*jax.tree.flatten(inner.get_args())[0])
         self.multiple_results = True
 
     def abstract(self, *args, **kwargs):
@@ -758,14 +756,13 @@ class VmapGF[R](GenPrimitive):
 
 
 class MapGF[R, S](GenPrimitive):
-    def __init__(self, inner: GFA[R], g: Callable[[R], S]):
-        super().__init__(f"Map[{inner.name}, {g.__name__}]")
+    def __init__(self, inner: MapA[R], g: Callable[[R], S]):
+        super().__init__(inner.name)
         self.inner = inner
         self.g = g
 
     def abstract(self, *args, **kwargs):
-        ia = self.inner.abstract(*args, **kwargs)
-        return self.g(ia)
+        return jax.tree.map(jax.core.get_aval, self.inner.shape)
 
     def simulate_p(
         self,
@@ -774,7 +771,7 @@ class MapGF[R, S](GenPrimitive):
         address: Address,
         constraint: Constraint,
     ) -> dict:
-        out = self.inner.get_impl().simulate_p(key, arg_tuple, address, constraint)
+        out = self.inner.inner.get_impl().simulate_p(key, arg_tuple, address, constraint)
         out["retval"] = self.g(out["retval"])
         return out
 
