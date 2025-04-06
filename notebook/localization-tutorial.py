@@ -1669,7 +1669,7 @@ def path_model(motion_settings):
             return s, s
 
         return step.scan()(robot_inputs["start"], robot_inputs["controls"]) @ "steps"
-    
+
     return path_model_inner()
 
 
@@ -1678,7 +1678,7 @@ def path_model(motion_settings):
 
 # %%
 key, sub_key = jax.random.split(key)
-#path_model(model_motion_settings).propose(sub_key)
+# path_model(model_motion_settings).propose(sub_key)
 path_model(model_motion_settings).propose(sub_key)
 # %%
 
@@ -1719,9 +1719,9 @@ Plot.Frames(
 N_samples = 12
 
 key, sub_key = jax.random.split(key)
-sample_paths = jax.vmap(
-    lambda k: path_model(model_motion_settings).propose(k)[2][1]
-)(jax.random.split(sub_key, N_samples))
+sample_paths = jax.vmap(lambda k: path_model(model_motion_settings).propose(k)[2][1])(
+    jax.random.split(sub_key, N_samples)
+)
 
 Plot.html(
     [
@@ -1748,14 +1748,17 @@ def full_model_kernel(motion_settings, sensor_noise, state, control):
     return pose
 
 
-@mg.Gen
-def full_model(motion_settings, sensor_noise):
-    return (
-        full_model_kernel.partial(motion_settings, sensor_noise)
-        .map(diag)
-        .scan()(robot_inputs["start"], robot_inputs["controls"])
-        @ "steps"
-    )
+def full_model_factory(motion_settings, sensor_noise):
+    @mg.Gen
+    def full_model():
+        return (
+            full_model_kernel.partial(motion_settings, sensor_noise)
+            .map(diag)
+            .scan()(robot_inputs["start"], robot_inputs["controls"])
+            @ "steps"
+        )
+
+    return full_model
 
 
 # %% [markdown]
@@ -1770,9 +1773,8 @@ def full_model(motion_settings, sensor_noise):
 
 # %%
 key, sub_key = jax.random.split(key)
-cm, score, retval = full_model(model_motion_settings, model_sensor_noise).propose(
-    sub_key
-)
+full_model = full_model_factory(model_motion_settings, model_sensor_noise)
+cm, score, retval = full_model().propose(sub_key)
 cm
 
 
@@ -1797,7 +1799,7 @@ def animate_path_and_sensors(path, readings, frame_key=None):
 
 
 # %%
-animate_path_and_sensors(retval[1], cm["steps", "sensor", "distance"])
+animate_path_and_sensors(retval[1], cm["steps"]["sensor"]["distance"])
 
 # %% [markdown]
 # ## From choicemaps to traces
@@ -1811,10 +1813,9 @@ animate_path_and_sensors(retval[1], cm["steps", "sensor", "distance"])
 # %%
 # `simulate` takes the GF plus a tuple of args to pass to it.
 key, sub_key = jax.random.split(key)
-trace = step_model.simulate(
-    sub_key,
-    (model_motion_settings, robot_inputs["start"], robot_inputs["controls"][0]),
-)
+trace = step_model(
+    model_motion_settings, robot_inputs["start"], robot_inputs["controls"][0]
+).simulate(sub_key)
 trace
 
 
@@ -1824,35 +1825,45 @@ trace
 # For starters, the trace contains all the information from `propose`.
 
 # %%
-trace.get_choices()
+mg.to_constraint(trace)
 # %%
-trace.get_score()
+mg.to_score(trace)
 
 # %%
-trace.get_retval()
+trace["retval"]
 # %% [markdown]
 # One can access from a trace the GF that produced it, along with with model parameters that were supplied.
-
+# NB: not in mini
 # %%
-trace.get_gen_fn()
+# trace.get_gen_fn()
 # %%
-trace.get_args()
+# trace.get_args()
 # %% [markdown]
 # Instead of (the log of) the product of all the primitive choices made in a trace, one can take the product over just a subset using `project`.
 
 # %%
-key, sub_key = jax.random.split(key)
-selections = [genjax.Selection.none(), S["p"], S["hd"], S["p"] | S["hd"]]
-[
-    trace.project(k, sel)
-    for k, sel in zip(jax.random.split(sub_key, len(selections)), selections)
-]
+
+# key, sub_key = jax.random.split(key)
+# selections = [genjax.Selection.none(), S["p"], S["hd"], S["p"] | S["hd"]]
+# [
+#     trace.project(k, sel)
+#     for k, sel in zip(jax.random.split(sub_key, len(selections)), selections)
+# ]
+
+# Minigenjax doesn't have selections, but it's possible to achieve the desired effect in
+# this case by running to_score on subtrees of the trace.
+
+project_p = mg.to_score(trace["subtraces"]["p"])
+project_hd = mg.to_score(trace["subtraces"]["hd"])
+assert mg.to_score(trace) == project_p + project_hd
+
 
 # %% [markdown]
 # Since the trace object has a lot going on, we use the Penzai visualization library to render the result. Click on the various nesting arrows to explore the structure.
 
 # %%
-pz.ts.display(trace)
+# not in mini (we don't have Penzai as a dependency)
+# pz.ts.display(trace)
 
 # %% [markdown]
 # ### Modifying traces
@@ -1861,50 +1872,50 @@ pz.ts.display(trace)
 #
 # One could, for instance, consider just the placement of the first step, and replace its stochastic choice of heading with an updated value. The original trace was typical under the pose prior model, whereas the modified one may be rather less likely. This plot is annotated with log of how much unlikelier, the score ratio:
 # %%
-key, k1, k2 = jax.random.split(key, 3)
-trace = step_model.simulate(
-    k1,
-    (model_motion_settings, robot_inputs["start"], robot_inputs["controls"][0]),
-)
-rotated_trace, rotated_trace_weight_diff, _, _ = trace.update(
-    k2, C["hd"].set(jnp.pi / 2)
-)
 
-(
-    world_plot
-    + pose_plots(trace.get_retval(), color=Plot.constantly("some pose"))
-    + pose_plots(
-        rotated_trace.get_retval(), color=Plot.constantly("with heading modified")
-    )
-    + Plot.color_map({"some pose": "green", "with heading modified": "red"})
-    + Plot.title("Modifying a heading")
-) | html(f"score ratio: {rotated_trace_weight_diff}")
+# mini does not have update
+
+# key, k1, k2 = jax.random.split(key, 3)
+# trace = step_model(model_motion_settings, robot_inputs["start"], robot_inputs["controls"][0]).simulate(k1)
+# rotated_trace, rotated_trace_weight_diff, _, _ = trace.update(
+#     k2, C["hd"].set(jnp.pi / 2)
+# )
+
+# (
+#     world_plot
+#     + pose_plots(trace.get_retval(), color=Plot.constantly("some pose"))
+#     + pose_plots(
+#         rotated_trace.get_retval(), color=Plot.constantly("with heading modified")
+#     )
+#     + Plot.color_map({"some pose": "green", "with heading modified": "red"})
+#     + Plot.title("Modifying a heading")
+# ) | html(f"score ratio: {rotated_trace_weight_diff}")
 
 # %% [markdown]
 # It is worth carefully thinking through a trickier instance of this.  Suppose instead, within the full path, we replaced the first step's stochastic choice of heading with some specific value.
 # %%
-key, k1, k2 = jax.random.split(key, 3)
-trace = path_model.simulate(k1, (model_motion_settings,))
-rotated_first_step, rotated_first_step_weight_diff, _, _ = trace.update(
-    k2, C["steps", 0, "hd"].set(jnp.pi / 2)
-)
+# key, k1, k2 = jax.random.split(key, 3)
+# trace = path_model.simulate(k1, (model_motion_settings,))
+# rotated_first_step, rotated_first_step_weight_diff, _, _ = trace.update(
+#     k2, C["steps", 0, "hd"].set(jnp.pi / 2)
+# )
 
 # %% [markdown]
 # Note carefully how, below, the green path has perfectly overdrawn the red path, except for the first pose.  Why has modifying the first pose not modified the rest of the path?  Trace through the execution of the code in detail to understand why.
 
 # %%
-(
-    world_plot
-    + [
-        pose_plots(pose, color=Plot.constantly("with heading modified"))
-        for pose in rotated_first_step.get_retval()[1]
-    ]
-    + [
-        pose_plots(pose, color=Plot.constantly("some path"))
-        for pose in trace.get_retval()[1]
-    ]
-    + Plot.color_map({"some path": "green", "with heading modified": "red"})
-) | html(f"score ratio: {rotated_first_step_weight_diff}")
+# (
+#     world_plot
+#     + [
+#         pose_plots(pose, color=Plot.constantly("with heading modified"))
+#         for pose in rotated_first_step.get_retval()[1]
+#     ]
+#     + [
+#         pose_plots(pose, color=Plot.constantly("some path"))
+#         for pose in trace.get_retval()[1]
+#     ]
+#     + Plot.color_map({"some path": "green", "with heading modified": "red"})
+# ) | html(f"score ratio: {rotated_first_step_weight_diff}")
 
 
 # %% [markdown]
@@ -1916,11 +1927,11 @@ rotated_first_step, rotated_first_step_weight_diff, _, _ = trace.update(
 
 # %%
 def get_path(trace):
-    return trace.get_retval()[1]
+    return trace["retval"][1]
 
 
 def get_sensors(trace):
-    return trace.get_choices()["steps", "sensor", "distance"]
+    return mg.to_constraint(trace)["steps"]["sensor"]["distance"]
 
 
 def animate_full_trace(trace, frame_key=None):
@@ -1931,7 +1942,7 @@ def animate_full_trace(trace, frame_key=None):
 
 # %%
 key, sub_key = jax.random.split(key)
-tr = full_model.simulate(sub_key, (model_motion_settings, model_sensor_noise))
+tr = full_model().simulate(sub_key)
 animate_full_trace(tr)
 
 # %% [markdown]
@@ -1947,14 +1958,16 @@ motion_settings_high_deviation = {
     "p_noise": 0.4,
     "hd_noise": 2 * degrees,
 }
+low_deviation_model = full_model_factory(
+    motion_settings_low_deviation, model_sensor_noise
+)
+high_deviation_model = full_model_factory(
+    motion_settings_high_deviation, model_sensor_noise
+)
 
 key, k_low, k_high = jax.random.split(jax.random.key(0), 3)
-trace_low_deviation = full_model.simulate(
-    k_low, (motion_settings_low_deviation, model_sensor_noise)
-)
-trace_high_deviation = full_model.simulate(
-    k_high, (motion_settings_high_deviation, model_sensor_noise)
-)
+trace_low_deviation = low_deviation_model().simulate(k_low)
+trace_high_deviation = high_deviation_model().simulate(k_high)
 
 (
     (
@@ -1977,12 +1990,12 @@ path_high_deviation = get_path(trace_high_deviation)
 observations_low_deviation = get_sensors(trace_low_deviation)
 observations_high_deviation = get_sensors(trace_high_deviation)
 
-constraints_low_deviation = C["steps", "sensor", "distance"].set(
-    observations_low_deviation
-)
-constraints_high_deviation = C["steps", "sensor", "distance"].set(
-    observations_high_deviation
-)
+constraints_low_deviation = {
+    "steps": {"sensor": {"distance": observations_low_deviation}}
+}
+constraints_high_deviation = {
+    "steps": {"sensor": {"distance": observations_high_deviation}}
+}
 
 # %% [markdown]
 # We summarize the information available to the robot to determine its location:
@@ -2061,11 +2074,11 @@ empty_world = Plot.new(
 
 # %%
 key, k1, k2 = jax.random.split(key, 3)
-trace_low, log_weight_low = full_model.importance(
-    k1, constraints_low_deviation, (model_motion_settings, model_sensor_noise)
+trace_low, log_weight_low = low_deviation_model().importance(
+    k1, constraints_low_deviation
 )
-trace_high, log_weight_high = full_model.importance(
-    k2, constraints_high_deviation, (model_motion_settings, model_sensor_noise)
+trace_high, log_weight_high = high_deviation_model().importance(
+    k2, constraints_high_deviation
 )
 
 (
