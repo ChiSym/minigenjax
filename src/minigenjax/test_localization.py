@@ -228,39 +228,58 @@ def test_localization():
     tr = full_model_kernel(
         motion_settings, sensor_noise, some_pose, Control(ds=0.5, dhd=0.0)
     ).simulate(sub_key)
-    print("fmk1", tr)
+    assert tr["retval"].p.shape == (2,)
 
     tr = full_model_kernel.partial(motion_settings, sensor_noise)(
         some_pose, Control(ds=0.5, dhd=0.0)
     ).simulate(sub_key)
-    print("fmk2", tr)
+    r = tr["retval"]
+    assert tr["retval"].p.shape == (2,)
 
     def diag(x):
         return (x, x)
 
-    tr = full_model_kernel.partial(motion_settings, sensor_noise).map(diag)(
-        some_pose, Control(ds=0.5, dhd=0.0)
-    ).simulate(sub_key)
-    print("fmk3", tr)
+    tr = (
+        full_model_kernel.partial(motion_settings, sensor_noise)
+        .map(diag)(some_pose, Control(ds=0.5, dhd=0.0))
+        .simulate(sub_key)
+    )
+    r = tr["retval"]
+    assert isinstance(r, tuple) and len(r) == 2
+    assert r[0].p.shape == (2,) and r[1].p.shape == (2,)
 
     tr = (
         full_model_kernel.partial(motion_settings, sensor_noise)
         .map(diag)
-        .scan()(some_pose, Control(ds=jnp.array([0.5, 0.2]), dhd=jnp.array([0.0, 0.0])))
+        .scan()(some_pose, robot_inputs["controls"])
         .simulate(sub_key)
     )
-    print("fmk4", tr)
+    assert tr["retval"][0].p.shape == (2,)
+    assert tr["retval"][1].p.shape == (3, 2)
 
-    @Gen
-    def full_model(motion_settings, sensor_noise):
-        return (
-            full_model_kernel.partial(motion_settings, sensor_noise)
-            .map(diag)
-            .scan()(robot_inputs["start"], robot_inputs["controls"])
-            @ "steps"
-        )
+    def full_model_factory(motion_settings, sensor_noise):
+        @Gen
+        def full_model():
+            return (
+                full_model_kernel.partial(motion_settings, sensor_noise)
+                .map(diag)
+                .scan()(robot_inputs["start"], robot_inputs["controls"])
+                @ "steps"
+            )
+
+        return full_model
 
     key, sub_key = jax.random.split(key)
+    full_model = full_model_factory(motion_settings, sensor_noise)()
 
-    # tr = full_model(motion_settings, sensor_noise).simulate(sub_key)
-    # print('fm', tr)
+    tr = full_model.simulate(sub_key)
+    assert tr["retval"][0].p.shape == (2,)
+    assert tr["retval"][1].p.shape == (len(robot_inputs["controls"]), 2)
+
+    observations = to_constraint(tr)["steps"]["sensor"]["distance"]
+    assert observations.shape == (len(robot_inputs["controls"]), len(sensor_angles))
+
+    constraint = {"steps": {"sensor": {"distance": observations}}}
+    key, sub_key = jax.random.split(key)
+    tr, w = full_model.importance(sub_key, constraint)
+    print(tr, w)

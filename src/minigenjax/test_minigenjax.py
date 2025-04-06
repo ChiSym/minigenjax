@@ -455,20 +455,18 @@ def test_plain_scan():
 def test_scan_map():
     @Gen
     def model(step, update):
-        return step + Normal(0.0, update) @ 's'
-    
+        return step + Normal(0.0, update) @ "s"
+
     def diag(r):
-        return r+1.0, r
+        return r + 1.0, r
 
     tr = model.map(diag)(10.0, 0.01).simulate(key0)
     assert tr["retval"] == (10.997942, 9.997942)
 
     tr = model.map(diag).scan()(1.0, jnp.ones(3) * 0.01).simulate(key0)
-    assert tr['retval'][0] == 3.986483
-    assert jnp.allclose(
-        tr['retval'][1],
-         jnp.array([1.9874847, 2.9816182, 3.986483])
-    )
+    assert tr["retval"][0] == 3.986483
+    assert jnp.allclose(tr["retval"][1], jnp.array([1.9874847, 2.9816182, 3.986483]))
+
 
 class TestCurve:
     def test_curve_model(self):
@@ -585,6 +583,23 @@ class TestCurve:
         tr = jax.vmap(jit_model)(jax.random.split(key0, 10))
         assert tr["subtraces"]["p"]["subtraces"]["c"]["retval"].shape == (10, 3)
         assert tr["retval"].shape == (10, 7)
+
+
+def test_map_map():
+    @Gen
+    def noisy(x):
+        return Normal(x, 0.01) @ "x"
+
+    m = noisy.map(lambda x: 2.0 * x).map(lambda x: 10.0 + x)
+
+    tr = m(1.0).simulate(key0)
+    assert tr["retval"] == 11.995883
+
+    m = noisy.map(lambda x: 2.0 * x).repeat(4).map(lambda x: 10.0 + x)
+    tr = m(1.0).simulate(key0)
+    assert jnp.allclose(
+        tr["retval"], jnp.array([12.006197, 11.972714, 12.045722, 12.013428])
+    )
 
 
 def test_map_vmap():
