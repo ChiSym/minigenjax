@@ -276,12 +276,6 @@ class RepeatA[R](GFA):
     def get_structure(self):
         return self.repeated.get_structure()
 
-    # def simulate(self, key: PRNGKeyArray):
-    #     return self.get_impl().simulate_p(key, self.arg_tuple, (), {})
-
-    # def __matmul__(self, address: str):
-    #     return self.get_impl().bind(*self.gfa.partial_args + self.gfa.args, at=address)
-
     def get_args(self):
         return self.arg_tuple
 
@@ -316,11 +310,6 @@ class MapA[R](GFA):
     # g.
     def __matmul__(self, address: str):
         return self.g(self.inner @ address)
-
-    # def simulate(self, key: PRNGKeyArray):
-    #     tr = self.inner.simulate(key)
-    #     tr['retval'] = self.g(tr['retval'])
-    #     return tr
 
 
 class VmapA[R](GFA):
@@ -687,12 +676,6 @@ class ScanGF[R](GenPrimitive):
         # scan would produce.
         ans[1]["retval"] = (ans[0][0], ans[1]["retval"][0])
         return ans[1]
-
-    def get_args(self) -> tuple:
-        return self.arg_tuple
-
-    def get_structure(self) -> PyTreeDef:
-        return self.gfi.get_structure()
 
 
 class VmapGF[R](GenPrimitive):
