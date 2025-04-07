@@ -675,13 +675,14 @@ class ScanGF[R](GenPrimitive):
         # fixed_args = (arg_tuple[0], jax.tree.map(lambda v: v[0], arg_tuple[1]))
         # gfi = self.g(*fixed_args)
 
-        def step(carry_key, s):
+        def step(carry_key, step_contraint):
             carry, key = carry_key
+            step, constraint = step_contraint
             key, k1 = KeySplit.bind(key, a="scan_step")
-            v = self.inner_impl.simulate_p(k1, (carry, s), address, constraint)
+            v = self.inner_impl.simulate_p(k1, (carry, step), address, constraint)
             return (v["retval"][0], key), v
 
-        ans = jax.lax.scan(step, (arg_tuple[0], key), arg_tuple[1])
+        ans = jax.lax.scan(step, (arg_tuple[0], key), (arg_tuple[1], constraint))
         # Fix the return values to report the things an ordinary use of
         # scan would produce.
         ans[1]["retval"] = (ans[0][0], ans[1]["retval"][0])
