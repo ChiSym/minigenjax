@@ -2122,7 +2122,10 @@ trace_high, log_weight_high = high_deviation_model().importance(
 # Thus in our running example, the projection in question is $\prod_{t=0}^T P_\text{sensor}(o_t)$.
 # %%
 key, sub_key = jax.random.split(key)
-log_weight_high - trace_high.project(sub_key, S["steps", "sensor", "distance"])
+# log_weight_high - trace_high.project(sub_key, S["steps", "sensor", "distance"])
+log_weight_high - mg.to_score(
+    trace_high["subtraces"]["steps"]["subtraces"]["sensor"]["subtraces"]["distance"]
+)
 
 
 # %% [markdown]
@@ -2134,32 +2137,25 @@ log_weight_high - trace_high.project(sub_key, S["steps", "sensor", "distance"])
 
 
 # %%
-def constraint_from_path(path):
-    c_ps = jax.vmap(lambda ix, p: C["steps", ix, "pose", "p"].set(p))(
-        jnp.arange(T), path.p
-    )
-    c_hds = jax.vmap(lambda ix, hd: C["steps", ix, "pose", "hd"].set(hd))(
-        jnp.arange(T), path.hd
-    )
-    return c_ps | c_hds
+def constraint_from_path_and_sensors(path, sensors):
+    return {"steps": {"pose": path.as_dict(), "sensor": {"distance": sensors}}}
+    # c_ps = jax.vmap(lambda ix, p: C["steps", ix, "pose", "p"].set(p))(
+    #     jnp.arange(T), path.p
+    # )
+    # c_hds = jax.vmap(lambda ix, hd: C["steps", ix, "pose", "hd"].set(hd))(
+    #     jnp.arange(T), path.hd
+    # )
+    # return c_ps | c_hds
 
 
-constraints_path_integrated = constraint_from_path(path_integrated)
+# constraints_path_integrated = constraint_from_path(path_integrated)
 
 key, k1, k2 = jax.random.split(key, 3)
 trace_path_integrated_observations_low_deviation, log_weight_low = (
-    full_model.importance(
-        k1,
-        constraints_path_integrated | constraints_low_deviation,
-        (model_motion_settings, model_sensor_noise),
-    )
+    full_model().importance(k1, constraint_from_path_and_sensors(path_integrated, constraints_low_deviation))
 )
 trace_path_integrated_observations_high_deviation, log_weight_high = (
-    full_model.importance(
-        k2,
-        constraints_path_integrated | constraints_high_deviation,
-        (model_motion_settings, model_sensor_noise),
-    )
+    full_model().importance(k2, constraint_from_path_and_sensors(path_integrated, constraints_high_deviation))
 )
 
 (
@@ -2447,7 +2443,7 @@ plot_inference_result(
 # reinforces steps with high posterior density, allowing better particles to proportionately
 # search more of the probability space while discarding unpromising particles.
 #
-# The following class attempts to generatlize this idea:
+# The following class attempts to generalize this idea:
 
 # %%
 StateT = TypeVar("StateT")
