@@ -231,7 +231,7 @@ class PartialA(GFI):
         return self.gfa.get_structure()
 
 
-class GFImpl(GenPrimitive):
+class GFImpl[R](GenPrimitive):
     def __init__(self, name):
         super().__init__(name)
 
@@ -243,6 +243,11 @@ class GFImpl(GenPrimitive):
         constraint: Constraint,
     ) -> dict:
         raise NotImplementedError(f"simulate_p: {self}")
+
+    def assess_p(
+        self, arg_tuple: tuple, constraint: Constraint, address
+    ) -> tuple[Float, R]:
+        raise NotImplementedError(f"assess_p: {self}")
 
 
 class PartialGF(GFImpl):
