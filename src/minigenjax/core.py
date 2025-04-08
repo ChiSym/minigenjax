@@ -1,5 +1,5 @@
 # %%
-from typing import Any, Callable, Sequence
+from typing import Any, Callable
 from jax._src.core import ClosedJaxpr as ClosedJaxpr
 import jax
 from jax._src.tree_util import PyTreeDef as PyTreeDef
@@ -18,6 +18,7 @@ from jaxtyping import Array, ArrayLike, PRNGKeyArray, Float
 Address = tuple[str, ...]
 Constraint = dict[str, "ArrayLike|Constraint"]
 PHANTOM_KEY = jax.random.key(987654321)
+InAxesT = int | tuple[int | None, ...] | None
 
 WrappedFunWithAux = tuple[jx.linear_util.WrappedFun, Callable[[], Any]]
 
@@ -44,13 +45,17 @@ class GenPrimitive(jx.core.Primitive):
     def concrete(self, *args, **kwargs):
         raise NotImplementedError(f"concrete: {self}")
 
-    def batch(self, vector_args, batch_axes, **kwargs):
+    def batch(
+        self,
+        vector_args,
+        batch_axes: InAxesT,
+        **kwargs,
+    ) -> tuple[Any, InAxesT]:
         # TODO assert all axes equal
         result = jax.vmap(lambda *args: self.impl(*args, **kwargs), in_axes=batch_axes)(
             *vector_args
         )
-        batched_axes = (batch_axes[0],) * len(result)
-        return result, batched_axes
+        return result, batch_axes
 
     def simulate_p(
         self,
@@ -76,9 +81,6 @@ class GenPrimitive(jx.core.Primitive):
         return jax.tree.map(inflate_one, v)
 
 
-InAxesT = int | Sequence[Any] | None
-
-
 # %%
 class Gen[R]:
     def __init__(self, f: Callable[..., R], partial_args=()):
@@ -88,7 +90,7 @@ class Gen[R]:
     def get_name(self) -> str:
         return self.f.__name__
 
-    def __call__(self, *args):
+    def __call__(self, *args) -> "GFI":
         return GFA(self.f, args, partial_args=self.partial_args)
 
     def repeat(self, n):
@@ -152,22 +154,9 @@ class Gen[R]:
         return ToPartial(args)
 
 
-# gfb is sort of the "final form"
-
-
-class GFA[R]:
-    def __init__(self, f, args, partial_args):
-        self.f = f
-        self.name = self.f.__name__
-        self.args = args
-        self.partial_args = partial_args
-
-        with jax.check_tracer_leaks():
-            self.shape = jax.eval_shape(f, *jax.tree.map(jax.core.get_aval, args))
-        self.structure = jax.tree.structure(self.shape)
-
-    def get_impl(self):
-        return GFB(self.f, self.shape)
+class GFI[R]:
+    def __init__(self, name):
+        self.name = name
 
     def simulate(self, key: PRNGKeyArray):
         return self.get_impl().simulate_p(key, self.get_args(), (), {})
@@ -190,17 +179,40 @@ class GFA[R]:
             self.get_impl().bind(*flat_args, at=address, in_tree=in_tree),
         )
 
+    def get_impl(self) -> "GFImpl":
+        raise NotImplementedError(f"get_impl: {self}")
+
+    def get_args(self) -> tuple:
+        raise NotImplementedError(f"get_args: {self}")
+
+    def get_structure(self) -> PyTreeDef:
+        raise NotImplementedError(f"get_structure: {self}")
+
     def abstract(self, *args, **kwargs):
         return self.get_impl().abstract(*args, **kwargs)
 
+
+class GFA[R](GFI[R]):
+    def __init__(self, f, args, partial_args):
+        super().__init__(f"GF[{f.__name__}]")
+        self.f = f
+        self.args = args
+
+        with jax.check_tracer_leaks():
+            self.shape = jax.eval_shape(f, *jax.tree.map(jax.core.get_aval, args))
+        self.structure = jax.tree.structure(self.shape)
+
+    def get_impl(self):
+        return GFB(self.f, self.shape)
+
     def get_args(self):
-        return self.partial_args + self.args
+        return self.args
 
     def get_structure(self):
         return self.structure
 
 
-class PartialA(GFA):
+class PartialA(GFI):
     def __init__(self, partial_args, args, next):
         # TODO: make the initialization sane by extracting a base class
         # so that GFA is not the root
@@ -219,8 +231,22 @@ class PartialA(GFA):
         return self.gfa.get_structure()
 
 
-class PartialGF(GenPrimitive):
-    def __init__(self, partial_args, inner):
+class GFImpl(GenPrimitive):
+    def __init__(self, name):
+        super().__init__(name)
+
+    def simulate_p(
+        self,
+        key: PRNGKeyArray,
+        arg_tuple: tuple,
+        address: Address,
+        constraint: Constraint,
+    ) -> dict:
+        raise NotImplementedError(f"simulate_p: {self}")
+
+
+class PartialGF(GFImpl):
+    def __init__(self, partial_args, inner: GFI):
         super().__init__(f"Partial[{inner.name}]")
         self.inner_impl = inner.get_impl()
         self.abstract_value = inner.abstract(
@@ -244,7 +270,7 @@ class PartialGF(GenPrimitive):
         return self.abstract_value
 
 
-class ScanA(GFA):
+class ScanA(GFI):
     def __init__(self, args, nxt):
         assert len(args) == 2
         self.args = args
@@ -263,12 +289,12 @@ class ScanA(GFA):
         return self.gfa.get_structure()
 
 
-class RepeatA[R](GFA):
+class RepeatA[R](GFI):
     def __init__(self, n, arg_tuple, next: Gen):
+        self.repeated = next(*arg_tuple)
+        super().__init__(f"Repeat[{n}, {self.repeated.name}]")
         self.n = n
         self.arg_tuple = arg_tuple
-        self.repeated = next(*arg_tuple)
-        self.name = f"Repeat[{n}, {self.repeated.name}]"
 
     def get_impl(self):
         return RepeatGF(self)
@@ -280,7 +306,7 @@ class RepeatA[R](GFA):
         return self.arg_tuple
 
 
-class MapA[R](GFA):
+class MapA[R](GFI):
     def __init__(self, g, arg_tuple, next):
         self.g = g
         self.arg_tuple = arg_tuple
@@ -312,7 +338,7 @@ class MapA[R](GFA):
         return self.g(self.inner @ address)
 
 
-class VmapA[R](GFA):
+class VmapA[R](GFI):
     def __init__(self, in_axes: InAxesT, args: tuple, nxt):
         self.in_axes = in_axes
         self.arg_tuple = args
@@ -352,7 +378,7 @@ class VmapA[R](GFA):
         return self.inner.get_structure()
 
 
-class GFB[R](GenPrimitive):
+class GFB[R](GFImpl):
     def __init__(self, f, shape):
         super().__init__(f"GFB[{f.__name__}]")
         self.f = f
@@ -390,7 +416,7 @@ class GFB[R](GenPrimitive):
         return a.score, retval
 
 
-class RepeatGF[R](GenPrimitive):
+class RepeatGF[R](GFImpl):
     SUB_TRACE = "__repeat"
 
     def __init__(self, inner: RepeatA[R]):
@@ -643,7 +669,7 @@ def Cond(tf, ff):
 # GFI to a lower level than here?
 
 
-class ScanGF[R](GenPrimitive):
+class ScanGF[R](GFImpl):
     def __init__(self, inner: ScanA):
         super().__init__(f"ScanGF[{inner.name}]")
         self.inner_impl = inner.get_impl()
@@ -678,7 +704,7 @@ class ScanGF[R](GenPrimitive):
         return ans[1]
 
 
-class VmapGF[R](GenPrimitive):
+class VmapGF[R](GFImpl):
     def __init__(self, inner: VmapA):
         super().__init__(inner.name)
         self.in_axes = inner.in_axes
@@ -722,7 +748,7 @@ class VmapGF[R](GenPrimitive):
         return jnp.sum(score), retval
 
 
-class MapGF[R, S](GenPrimitive):
+class MapGF[R, S](GFImpl):
     def __init__(self, inner: MapA[R], g: Callable[[R], S]):
         super().__init__(inner.name)
         self.inner_impl = inner.inner.get_impl()

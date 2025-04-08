@@ -1030,4 +1030,21 @@ def test_partial():
     assert tr1["retval"] == tr["retval"]
 
 
-# %%
+def test_categorial_jaxpr():
+    N = 10
+
+    @Gen
+    def model(key):
+        logits = Normal(jnp.zeros(5), jnp.ones(5)) @ "logits"
+        return jax.vmap(Categorical(logits=logits).sample)(jax.random.split(key, N))
+
+    key, k1, k2 = jax.random.split(key0, 3)
+    m = model(k1).simulate(k2)
+    print(m)
+    # this is basically a stub, since we may want to experiment with
+    # a new kind of primitive for sampling outside of a generative function
+    # that does not expand to machine code under vmap. The problem is that
+    # if someone does their own vmap over Categorical, vmap passes over the
+    # primitive boundary, since the distribution isn't being used generatively.
+
+    # %%
