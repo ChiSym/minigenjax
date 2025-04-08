@@ -84,6 +84,7 @@ class Distribution(mg.GenPrimitive):
 
             def sample(self, key: PRNGKeyArray):
                 return self.to_tfp().sample(seed=key)
+                return this.bind(key, *args, op="Sample", at="here")
 
             # TODO: from here, you can't `map` a distribution.
 
