@@ -1,6 +1,5 @@
 # %%
 # pyright: reportWildcardImportFromLibrary=false
-import dataclasses
 import math
 import jax
 import jax.numpy as jnp
@@ -12,6 +11,11 @@ from minigenjax import *
 def model1(b):
     y = Normal(b, 0.1) @ "x"
     return y
+
+
+@Gen
+def void_model(b):
+    _ = Normal(b, 9.1) @ "b"
 
 
 @Gen
@@ -56,8 +60,7 @@ def coefficient():
     return Normal(0.0, 1.0) @ "c"
 
 
-@jax.tree_util.register_dataclass
-@dataclasses.dataclass
+@pytree
 class Poly:
     coefficients: jax.Array
 
@@ -74,8 +77,8 @@ key0 = jax.random.key(0)
 
 
 def test_pytree():
-    poly = coefficient().repeat(3).map(Poly)
-    tr = poly.simulate(key0)
+    poly = coefficient.repeat(3).map(Poly)
+    tr = poly().simulate(key0)
     p = tr["retval"]
     assert jnp.allclose(p.coefficients, jnp.array([1.1188384, 0.5781488, 0.8535516]))
 
@@ -94,6 +97,33 @@ def test_pytree():
         tr["retval"], jnp.array([3.37815, 1.3831037, 1.1251557, 2.533188])
     )
 
+    @Gen
+    def wrap_poly():
+        p = poly() @ "p"
+        return p
+
+    tr = jax.jit(wrap_poly().simulate)(key0)
+    assert isinstance(tr["retval"], Poly)
+
+    @Gen
+    def wrap_poly2():
+        cs = coefficient.repeat(3)() @ "cs"
+        return Poly(cs)
+
+    tr = jax.jit(wrap_poly2().simulate)(key0)
+    assert isinstance(tr["retval"], Poly)
+
+
+def test_pytree_iteration():
+    poly = coefficient.repeat(3).map(Poly)
+    tr = jax.vmap(poly().simulate)(jax.random.split(key0, 100))
+    ps = tr["retval"]
+    # switch from plural Poly to list of Polys
+    list_of_p = [p for p in ps]
+    assert len(list_of_p) == 100
+    assert jnp.allclose(list_of_p[0].coefficients, ps[0].coefficients)
+    assert jnp.allclose(list_of_p[99].coefficients, ps[99].coefficients)
+
 
 # %%
 def test_normal_model():
@@ -108,6 +138,11 @@ def test_normal_model():
         },
     }
     assert tr == expected
+    c, score, retval = model1(10.0).propose(key0)
+    assert c == {"x": tr["subtraces"]["x"]["retval"]}
+    assert score == tr["subtraces"]["x"]["score"]
+
+    tr = void_model(10.0).simulate(key0)
 
 
 def test_uniform_model():
@@ -139,7 +174,6 @@ def test_logit_vs_probs():
         return g, p
 
     tr = model().simulate(key0)
-    print(jax.make_jaxpr(model().simulate)(key0))
     assert tr["subtraces"]["l"]["retval"] == 1.0
     assert (
         tr["subtraces"]["l"]["score"]
@@ -153,7 +187,7 @@ def test_logit_vs_probs():
 
 
 def test_model_vmap():
-    tr = jax.vmap(model3(50.0).map(sum).simulate)(jax.random.split(key0, 5))
+    tr = jax.vmap(model3.map(sum)(50.0).simulate)(jax.random.split(key0, 5))
     assert jnp.allclose(
         tr["retval"], jnp.array([76.4031, 76.777, 75.255844, 76.623726, 76.145515])
     )
@@ -173,6 +207,9 @@ def test_model_vmap():
         tr["subtraces"]["b"]["subtraces"]["x"]["score"],
         jnp.array([-0.6931472, -0.6931472, -0.6931472, -0.6931472, -0.6931472]),
     )
+    assert to_score(tr) == jnp.sum(
+        tr["subtraces"]["b"]["subtraces"]["x"]["score"]
+    ) + jnp.sum(tr["subtraces"]["a"]["subtraces"]["x"]["score"])
 
 
 def test_distribution_as_sampler():
@@ -180,7 +217,7 @@ def test_distribution_as_sampler():
         return lambda f: jax.vmap(f)(jax.random.split(key0, n))
 
     assert jnp.allclose(
-        vmap(10)(Normal(0.0, 0.01)),
+        vmap(10)(Normal(0.0, 0.01).sample),
         jnp.array(
             [
                 -0.00449334,
@@ -197,7 +234,7 @@ def test_distribution_as_sampler():
         ),
     )
     assert jnp.allclose(
-        vmap(10)(Uniform(5.0, 6.0)),
+        vmap(10)(Uniform(5.0, 6.0).sample),
         jnp.array(
             [
                 5.3265953,
@@ -214,15 +251,15 @@ def test_distribution_as_sampler():
         ),
     )
     assert jnp.allclose(
-        vmap(10)(Flip(0.5)),
+        vmap(10)(Flip(0.5).sample),
         jnp.array([1, 1, 1, 0, 1, 1, 0, 1, 1, 0]),
     )
     assert jnp.allclose(
-        vmap(10)(Categorical(logits=jnp.array([1.1, -1.0, 0.9]))),
+        vmap(10)(Categorical(logits=jnp.array([1.1, -1.0, 0.9])).sample),
         jnp.array([0, 0, 2, 2, 0, 1, 0, 0, 0, 0]),
     )
     assert jnp.allclose(
-        vmap(10)(MvNormalDiag(jnp.array([1.0, 10.0, 100.0]), 0.1 * jnp.ones(3))),
+        vmap(10)(MvNormalDiag(jnp.array([1.0, 10.0, 100.0]), 0.1 * jnp.ones(3)).sample),
         jnp.array(
             [
                 [1.0678201, 9.900013, 100.02386],
@@ -240,6 +277,28 @@ def test_distribution_as_sampler():
     )
 
 
+def test_mixture():
+    m = Mixture(Categorical(probs=[0.3, 0.7]), [Normal(0.0, 1.0), Normal(10.0, 1.0)])
+    ys = jax.vmap(m.sample)(jax.random.split(key0, 10))
+    assert jnp.allclose(
+        ys,
+        jnp.array(
+            [
+                12.664838,
+                0.14686993,
+                -1.2831976,
+                10.281769,
+                -0.5806916,
+                9.012323,
+                10.005001,
+                10.695513,
+                0.5217198,
+                9.937291,
+            ]
+        ),
+    )
+
+
 def test_cond_model():
     b = 100.0
     tr = model1(b).simulate(key0)
@@ -252,7 +311,7 @@ def test_cond_model():
     tr = c(1).simulate(key0)
     assert jnp.allclose(tr["retval"], jnp.array(99.979416))
     tr = jax.vmap(lambda i, k: c(i).simulate(k))(
-        jnp.mod(jnp.arange(10.0), 2), jax.random.split(key0, 10)
+        jnp.mod(jnp.arange(10), 2), jax.random.split(key0, 10)
     )
     assert jnp.allclose(
         tr["retval"],
@@ -308,6 +367,18 @@ def test_ordinary_cond():
     assert tr["subtraces"]["n"]["retval"] == -1.2515389
 
 
+def test_cond_of_two_distributions():
+    @Gen
+    def m():
+        f = Flip(0.5) @ "f"
+        p = Cond(Normal(10.0, 0.1), Normal(1.0, 0.1))(f) @ "p"
+        return f, p
+
+    tr = m().simulate(key0)
+    assert tr["subtraces"]["f"]["retval"] == 1.0
+    assert tr["subtraces"]["p"]["retval"] == 10.014389
+
+
 def test_intervening_functions():
     @Gen
     def h():
@@ -334,10 +405,24 @@ def test_scan_model():
 
     @Gen
     def scan_update():
-        return Scan(update)(10.0, jnp.arange(0.1, 0.6, 0.1)) @ "S"
+        return update.scan()(10.0, jnp.arange(0.1, 0.6, 0.1)) @ "S"
 
-    tr = scan_update().simulate(key0)
+    tr = update.scan()(10.0, jnp.arange(0.1, 0.6, 0.1)).simulate(key0)
+    print(f"final tr {tr}")
     assert jnp.allclose(tr["retval"][0], 11.482168)
+    assert jnp.allclose(
+        tr["retval"][1],
+        jnp.array([10.087484, 10.281618, 10.586483, 10.988654, 11.482168]),
+    )
+    assert jnp.allclose(
+        tr["subtraces"]["drift"]["retval"],
+        jnp.array([0.08748461, 0.19413349, 0.30486485, 0.4021714, 0.49351367]),
+    )
+    assert jnp.allclose(
+        tr["subtraces"]["drift"]["score"],
+        jnp.array([2.903057, 3.514152, 3.5678985, 3.6626565, 3.4758694]),
+    )
+    tr = scan_update().simulate(key0)
     assert jnp.allclose(
         tr["retval"][1],
         jnp.array([10.087484, 10.281618, 10.586483, 10.988654, 11.482168]),
@@ -359,12 +444,28 @@ def test_plain_scan():
         return jax.lax.scan(lambda a, b: (a + b, a + b), init, jnp.arange(5.0))
 
     tr = model(10.0).simulate(key0)
-    assert tr["retval"][0] == 19.987484
+    assert tr["retval"][0] == 19.997942
     assert jnp.allclose(
         tr["retval"][1],
-        jnp.array([9.987485, 10.987485, 12.987485, 15.987485, 19.987484]),
+        jnp.array([9.997942, 10.997942, 12.997942, 15.997942, 19.997942]),
     )
-    assert tr["subtraces"]["init"]["retval"] == 9.987485
+    assert tr["subtraces"]["init"]["retval"] == 9.997942
+
+
+def test_scan_map():
+    @Gen
+    def model(step, update):
+        return step + Normal(0.0, update) @ "s"
+
+    def diag(r):
+        return r + 1.0, r
+
+    tr = model.map(diag)(10.0, 0.01).simulate(key0)
+    assert tr["retval"] == (10.997942, 9.997942)
+
+    tr = model.map(diag).scan()(1.0, jnp.ones(3) * 0.01).simulate(key0)
+    assert tr["retval"][0] == 3.986483
+    assert jnp.allclose(tr["retval"][1], jnp.array([1.9874847, 2.9816182, 3.986483]))
 
 
 class TestCurve:
@@ -396,13 +497,40 @@ class TestCurve:
         assert jnp.allclose(tr["retval"], jnp.array([0.9980389, 0.91635126, 1.0424924]))
 
     def test_curve_generation(self):
-        quadratic = coefficient().repeat(3).map(Poly)
+        quadratic = coefficient.repeat(3).map(Poly)
         points = jnp.arange(-3, 4) / 10.0
 
-        # curve_model(f, x, p_outlier, sigma_inlier)
+        tr = quadratic().simulate(key0)
+        assert isinstance(tr["retval"], Poly)
+
+        tr = quadratic.repeat(n=3)().simulate(key0)
+        assert isinstance(tr["retval"], Poly)
+
+        @Gen
+        def one_model(x):
+            poly = quadratic() @ "p"
+            return poly(x)
+
+        # print(jax.make_jaxpr(one_model(0.0).simulate)(key0))
+
+        tr = one_model(0.0).simulate(key0)
+        assert tr["retval"] == 1.1188384
+
+        # assert isinstance(tr["subtraces"]["p"]["retval"], Poly)
+        #
+        # One might wish this were true, but what happens is that JAX tracing
+        # simply takes the output of quadratic and evaluates it at x without
+        # constructing the intermediate polynomial object. This could be
+        # considered a feature or a bug depending on how you look at it.
+        # The JAXPR above begins with
+        # { lambda ; a:f32[]. let
+        #    b:f32[3] = RepeatGF[3, coefficient][at=p in_tree=PyTreeDef(())]
+        # and so the MapGF object is not bound during the jit. This is ultimately
+        # because MapA's __matmul__ operation delegates to the inner function.
+
         @Gen
         def model(xs):
-            poly = quadratic @ "p"
+            poly = quadratic() @ "p"
             p_outlier = Uniform(0.0, 1.0) @ "p_outlier"
             sigma_inlier = Uniform(0.0, 0.3) @ "sigma_inlier"
             return (
@@ -412,7 +540,6 @@ class TestCurve:
                 @ "y"
             )
 
-        # print(jax.make_jaxpr(model(points).simulate)(key0))
         jit_model = jax.jit(model(points).simulate)
 
         tr = jit_model(key0)
@@ -458,6 +585,36 @@ class TestCurve:
         assert tr["retval"].shape == (10, 7)
 
 
+def test_map_map():
+    @Gen
+    def noisy(x):
+        return Normal(x, 0.01) @ "x"
+
+    m = noisy.map(lambda x: 2.0 * x).map(lambda x: 10.0 + x)
+
+    tr = m(1.0).simulate(key0)
+    assert tr["retval"] == 11.995883
+
+    m = noisy.map(lambda x: 2.0 * x).repeat(4).map(lambda x: 10.0 + x)
+    tr = m(1.0).simulate(key0)
+    assert jnp.allclose(
+        tr["retval"], jnp.array([12.006197, 11.972714, 12.045722, 12.013428])
+    )
+
+
+def test_map_vmap():
+    @Gen
+    def noisy(x):
+        return Normal(x, 0.01) @ "x"
+
+    def plus5(x):
+        return x + 5.0
+
+    noisy_plus5 = noisy.map(plus5)(10.0)
+    tr = jax.vmap(noisy_plus5.simulate)(jax.random.split(key0, 3))
+    assert jnp.allclose(tr["retval"], jnp.array([15.0111885, 15.005781, 15.008535]))
+
+
 def test_map():
     @Gen
     def noisy(x):
@@ -466,9 +623,9 @@ def test_map():
     def plus5(x):
         return x + 5.0
 
-    noisy_plus5 = noisy(10).map(plus5)
-    tr = jax.vmap(noisy_plus5.simulate)(jax.random.split(key0, 3))
-    assert jnp.allclose(tr["retval"], jnp.array([15.0111885, 15.005781, 15.008535]))
+    noisy_plus5 = noisy.map(plus5)
+    tr = noisy_plus5(10.0).simulate(key0)
+    assert tr["retval"] == 14.997942
 
 
 def test_simple_repeat():
@@ -479,7 +636,7 @@ def test_simple_repeat():
     def Poly(coefficient_gf, n):
         @Gen
         def poly():
-            return coefficient_gf().repeat(n) @ "cs"
+            return coefficient_gf.repeat(n)() @ "cs"
 
         return poly
 
@@ -497,7 +654,7 @@ def test_repeat_in_model():
 
     @Gen
     def xs():
-        return x(10.0).repeat(4) @ "xs"
+        return x.repeat(4)(10.0) @ "xs"
 
     tr = xs().simulate(key0)
     assert jnp.allclose(
@@ -510,7 +667,7 @@ def test_repeat_of_repeat():
     def y(x):
         return Normal(2.0 * x + 1, 0.1) @ "y"
 
-    tr = y(5.0).repeat(4).repeat(3).simulate(key0)
+    tr = y.repeat(4).repeat(3)(5.0).simulate(key0)
     assert jnp.allclose(
         tr["retval"],
         jnp.array(
@@ -523,6 +680,46 @@ def test_repeat_of_repeat():
     )
 
 
+def test_shaped_distribution():
+    @Gen
+    def f(x):
+        lows = x + jnp.arange(4.0)
+        highs = lows + 1
+        y = Uniform(lows, highs) @ "y"
+        print(f"y {y}")
+        return y
+
+    tr = jax.jit(f(2.0).simulate)(key0)
+    assert jnp.allclose(
+        tr["retval"], jnp.array([2.9653215, 3.225159, 4.63303, 5.296382])
+    )
+    print("a done")
+    tr = jax.jit(f.repeat(3)(2.0).simulate)(key0)
+    assert jnp.allclose(
+        tr["retval"],
+        jnp.array(
+            [
+                [2.8321762, 3.5617104, 4.3968754, 5.8156433],
+                [2.356292, 3.640267, 4.5045667, 5.450263],
+                [2.544363, 3.2582088, 4.394433, 5.1704683],
+            ]
+        ),
+    )
+    print("b done")
+    tr = f.vmap()(jnp.arange(2.0, 5.0)).simulate(key0)
+    print(tr)
+    assert jnp.allclose(
+        tr["retval"],
+        jnp.array(
+            [
+                [2.8321762, 3.5617104, 4.3968754, 5.8156433],
+                [3.356292, 4.640267, 5.5045667, 6.450263],
+                [4.544363, 5.2582088, 6.394433, 7.1704683],
+            ]
+        ),
+    )
+
+
 def test_map_in_model():
     @Gen
     def x(y):
@@ -530,7 +727,7 @@ def test_map_in_model():
 
     @Gen
     def mx():
-        return x(7.0).map(lambda t: t + 13.0) @ "mx"
+        return x.map(lambda t: t + 13.0)(7.0) @ "mx"
 
     tr = jax.vmap(mx().simulate)(jax.random.split(key0, 5))
     assert jnp.allclose(
@@ -543,17 +740,17 @@ def test_map_of_repeat():
     def coefficient():
         return Normal(0.0, 1.0) @ "c"
 
-    pg = coefficient().repeat(3).map(Poly)
+    pg = coefficient.repeat(3).map(Poly)
 
-    tr = pg.simulate(key0)
+    tr = pg().simulate(key0)
     assert jnp.allclose(
         tr["retval"].coefficients, jnp.array([1.1188384, 0.5781488, 0.8535516])
     )
     assert jnp.allclose(tr["retval"](1.0), jnp.array(2.5505388))
     assert jnp.allclose(tr["retval"](2.0), jnp.array(5.6893425))
 
-    kg = coefficient().repeat(3).map(jnp.sum)
-    tr = kg.simulate(key0)
+    kg = coefficient.repeat(3).map(jnp.sum)
+    tr = kg().simulate(key0)
     assert jnp.allclose(tr["retval"], jnp.array(2.5505388))
 
 
@@ -562,7 +759,7 @@ def test_repeat_of_map():
     def y(x):
         return Normal(x, 0.1) @ "y"
 
-    mr = y(7.0).map(lambda x: x + 13.0).repeat(5)
+    mr = y.map(lambda x: x + 13.0).repeat(5)(7.0)
 
     tr = mr.simulate(key0)
     assert jnp.allclose(
@@ -571,7 +768,7 @@ def test_repeat_of_map():
 
 
 def test_repeat_of_cond():
-    repeated_model = cond_model(60.0).repeat(5)
+    repeated_model = cond_model.repeat(5)(60.0)
     tr = repeated_model.simulate(key0)
     assert jnp.allclose(
         tr["retval"], jnp.array([60.057796, 31.760138, 30.233942, 31.401255, 60.03401])
@@ -611,7 +808,6 @@ def test_vmap():
     assert jnp.allclose(tr3["retval"], tr2["retval"])
 
 
-@pytest.mark.skip(reason="nested vmap not working yet")
 def test_vmap_of_vmap():
     @Gen
     def model(x, y):
@@ -619,19 +815,61 @@ def test_vmap_of_vmap():
 
     tr = (
         model.vmap(in_axes=(0, None))
-        # .vmap(in_axes=(None, 0))
-        (jnp.arange(10.0, 15.0), jnp.arange(0.0, 1.6, 0.2)).simulate(key0)
+        .vmap(in_axes=(None, 0))(jnp.arange(10.0, 15.0), jnp.arange(0.01, 1.6, 0.2))
+        .simulate(key0)
     )
     assert jnp.allclose(
         tr["retval"],
         jnp.array(
-            # this looked promising but it was cheating by using broadcast semantics on the inner loop
             [
-                [10.0, 11.0, 12.0, 13.0, 14.0],
-                [9.807053, 11.150885, 11.985554, 12.91451, 13.865575],
-                [9.949703, 11.00537, 12.350649, 13.016957, 14.176276],
-                [9.51422, 10.44197, 10.95027, 12.562811, 14.896659],
-                [9.411664, 11.082625, 11.907326, 14.153446, 13.8836355],
+                [9.980059, 10.992979, 11.998503, 13.001312, 13.9893465],
+                [9.772663, 10.905136, 12.166004, 13.0292635, 14.077281],
+                [9.753119, 11.061454, 11.409804, 12.195795, 13.536638],
+                [9.595552, 10.138563, 12.190451, 13.225649, 13.833795],
+                [9.990936, 11.381924, 12.071567, 12.975254, 14.015008],
+                [10.9114685, 10.054609, 14.262349, 13.079898, 14.60372],
+                [9.475578, 12.222159, 10.996534, 12.424293, 14.845172],
+                [7.6874547, 12.22144, 14.473383, 13.540619, 13.886542],
+            ]
+        ),
+    )
+
+
+def test_repeat_of_vmap_of_vmap():
+    @Gen
+    def model(x, y):
+        return Normal(x, y) @ "n"
+
+    tr = (
+        model.vmap(in_axes=(0, None))
+        .vmap(in_axes=(None, 0))
+        .repeat(2)(jnp.arange(10.0, 15.0), jnp.arange(0.01, 1.6, 0.2))
+        .simulate(key0)
+    )
+    assert jnp.allclose(
+        tr["retval"],
+        jnp.array(
+            [
+                [
+                    [9.98233, 11.012119, 11.995529, 12.987698, 13.984681],
+                    [9.880095, 10.422894, 11.8534565, 13.146841, 14.150014],
+                    [10.230905, 10.994424, 11.013716, 13.473481, 14.141039],
+                    [10.71579, 12.493758, 11.768768, 13.410502, 14.459529],
+                    [10.525383, 10.150476, 11.152355, 13.285344, 15.705538],
+                    [12.124693, 11.984819, 11.852717, 11.719085, 14.450966],
+                    [10.691346, 11.318585, 14.612149, 13.587466, 14.294254],
+                    [7.8196483, 10.1949415, 9.634014, 13.361837, 16.955917],
+                ],
+                [
+                    [9.9943495, 11.002772, 11.99024, 13.001721, 14.030841],
+                    [10.308016, 10.665509, 11.690561, 12.951824, 13.819061],
+                    [9.571521, 10.517977, 11.905054, 13.208078, 14.319961],
+                    [9.619272, 11.235063, 11.404709, 12.237741, 14.299757],
+                    [11.264292, 12.461842, 11.243113, 13.063782, 13.424688],
+                    [12.247608, 11.796663, 10.529431, 13.871386, 12.75831],
+                    [12.851632, 9.468134, 11.794028, 14.386365, 15.522833],
+                    [6.649953, 10.184404, 11.6551485, 12.685906, 14.721641],
+                ],
             ]
         ),
     )
@@ -649,17 +887,58 @@ def test_assess():
         return p() @ "p"
 
     constraints = {"x": 2.0, "y": 2.1}
-    w = p().assess(constraints)
+    w, retval = p().assess(constraints)
     assert w == -6.0428767
-    w = q().assess({"p": constraints})
+    assert retval == (2.0, 2.1)
+    w, retval = q().assess({"p": constraints})
     assert w == -6.0428767
+
+    with pytest.raises(MissingConstraint) as e:
+        _ = p().assess({"x": 2.0})
+    assert e.value.args == (("y",),)
+
+    with pytest.raises(MissingConstraint) as e:
+        _ = p().assess({"y": 2.0})
+    assert e.value.args == (("x",),)
+
+
+def test_assess_vmap1():
+    @Gen
+    def p(a):
+        return Normal(a, 0.01) @ "x"
+
+    w, retval = p.vmap()(jnp.arange(5.0)).assess({"x": jnp.arange(5.0) + 0.2})
+    assert w == pytest.approx(-981.56934)
+
+
+def test_assess_vmap():
+    @Gen
+    def p(a, b):
+        x = Normal(a, 1.0) @ "x"
+        y = Normal(b, 1.0) @ "y"
+        return x, y
+
+    model = p.vmap()(jnp.arange(5.0), 10.0 + jnp.arange(5.0))
+    w, retval = model.assess(
+        {"x": jnp.arange(5.0) + 0.1, "y": 10.0 + jnp.arange(5.0) + 0.2}
+    )
+    assert w == -9.314385
+
+
+def test_assess_repeat():
+    @Gen
+    def m(a):
+        return Normal(a, 1.0) @ "x"
+
+    w, _ = m.repeat(4)(10.0).assess({"x": 10.0 + 0.1 * jnp.ones(4)})
+    assert w == -3.6957543
 
 
 def test_bernoulli():
     @Gen
     def p():
         b = Bernoulli(probs=0.01) @ "b"
-        c = Bernoulli(logits=-1) @ "c"
+        c = Bernoulli(logits=-1.0) @ "c"
         return b, c
 
     tr = p().simulate(key0)
@@ -692,16 +971,15 @@ def test_importance():
     model_imp = jax.jit(model().importance)
     outer_imp = jax.jit(outer().importance)
 
-    tr1 = model_imp(key0, {"a": 1.0})
-    assert tr1["w"] == -1.4189385
-    tr2 = model_imp(key0, {"b": 1.0})
-    assert tr2["w"] == -48.616352
-    tr3 = model_imp(key0, {"a": 1.0, "b": 1.0})
-    assert tr3["w"] == tr1["w"] + tr2["w"]
+    tr1, w1 = model_imp(key0, {"a": 1.0})
+    assert w1 == -1.4189385
+    tr2, w2 = model_imp(key0, {"b": 1.0})
+    assert w2 == -48.616352
+    tr3, w3 = model_imp(key0, {"a": 1.0, "b": 1.0})
+    assert w3 == w1 + w2
 
-    tr4 = outer_imp(key0, {"c": 0.5, "d": {"b": 0.3}})
-
-    assert tr4["w"] == -4.160292
+    tr4, w4 = outer_imp(key0, {"c": 0.5, "d": {"b": 0.3}})
+    assert w4 == -4.160292
 
 
 def test_repeat_importance():
@@ -711,30 +989,62 @@ def test_repeat_importance():
         b = Normal(z, 1.0) @ "b"
         return a + b
 
-    mr = model(1.0).repeat(4)
+    mr = model.repeat(4)(1.0)
     mr_imp = jax.jit(mr.importance)
     values = jnp.arange(4) / 10.0
-    tr = mr_imp(key0, {"a": values})
+    tr, w = mr_imp(key0, {"a": values})
     assert jnp.allclose(tr["subtraces"]["a"]["retval"], values)
-    assert tr["w"] == -141.46541
-    assert tr["w"] == jnp.sum(tr["subtraces"]["a"]["w"])
+    assert w == -141.46541
+    assert w == jnp.sum(tr["subtraces"]["a"]["w"])
 
 
 def test_vmap_importance():
     @Gen
-    def model(z):
-        a = Normal(z, 0.1) @ "a"
-        b = Normal(z, 1.0) @ "b"
+    def model(x, y):
+        a = Normal(x, 0.1) @ "a"
+        b = Normal(y, 0.2) @ "b"
         return a + b
 
-    values = jnp.arange(4.0)
-    mv = model.vmap()(values)
-    mv_imp = jax.jit(mv.importance)
-    observed_values = values + 0.1
-    values = jnp.array(observed_values)
-    tr = mv_imp(key0, {"a": values})
-    assert tr["w"] == 3.534588
-    assert jnp.allclose(tr["subtraces"]["a"]["retval"], observed_values)
+    values = jnp.arange(5.0)
+    mv1 = model.vmap(in_axes=(0, None))(values, 10.0)
+    mv1_imp = jax.jit(mv1.importance)
+    observed_values = values + 0.2
+    tr, w1 = mv1_imp(key0, {"a": observed_values})
+    assert w1 == -3.0817661
+    mv2 = model.vmap(in_axes=(None, 0))(10.0, values)
+    tr, w2 = jax.jit(mv2.importance)(key0, {"b": observed_values})
+    assert w2 == 0.95249736
+    mv3 = model.vmap()(values, values)
+    tr, w3 = jax.jit(mv3.importance)(key0, {"a": observed_values, "b": observed_values})
+    assert w3 == w2 + w1
 
 
-# %%
+def test_partial():
+    @Gen
+    def model(x, y):
+        return Normal(x, y) @ "x"
+
+    tr = model.partial(10.0)(0.01).simulate(key0)
+    assert tr["retval"] == 9.997942
+    tr1 = model.partial(10.0, 0.01)().simulate(key0)
+    assert tr1["retval"] == tr["retval"]
+
+
+def test_categorial_jaxpr():
+    N = 10
+
+    @Gen
+    def model(key):
+        logits = Normal(jnp.zeros(5), jnp.ones(5)) @ "logits"
+        return jax.vmap(Categorical(logits=logits).sample)(jax.random.split(key, N))
+
+    key, k1, k2 = jax.random.split(key0, 3)
+    m = model(k1).simulate(k2)
+    print(m)
+    # this is basically a stub, since we may want to experiment with
+    # a new kind of primitive for sampling outside of a generative function
+    # that does not expand to machine code under vmap. The problem is that
+    # if someone does their own vmap over Categorical, vmap passes over the
+    # primitive boundary, since the distribution isn't being used generatively.
+
+    # %%
