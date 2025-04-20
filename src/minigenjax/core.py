@@ -1,8 +1,6 @@
 # %%
 from typing import Any, Callable
-from jax._src.core import ClosedJaxpr as ClosedJaxpr
 import jax
-from jax._src.tree_util import PyTreeDef as PyTreeDef
 import jax.tree
 import jax.api_util
 import jax.numpy as jnp
@@ -11,7 +9,7 @@ from minigenjax.key import KeySplit
 from minigenjax.trace import to_constraint, to_score, to_weight
 import jax.extend as jx
 import jax.core
-from jaxtyping import Array, ArrayLike, PRNGKeyArray, Float
+from jaxtyping import Array, ArrayLike, PRNGKeyArray, Float, PyTreeDef
 
 
 # %%
@@ -339,8 +337,8 @@ class MapA[R](GFI):
     # doing this short circuits the impl, so that MapGF doesn't get into the
     # jaxpr. Fixing this would mean learning the structure that is produced by
     # g.
-    def __matmul__(self, address: str):
-        return self.g(self.inner @ address)
+    # def __matmul__(self, address: str):
+    #     return self.g(self.inner @ address)
 
 
 class VmapA[R](GFI):
@@ -667,11 +665,6 @@ def Cond(tf, ff):
         return Binder()
 
     return ctor
-
-
-# I'm running out of good ideas.
-# Maybe we want to move the creation of the
-# GFI to a lower level than here?
 
 
 class ScanGF[R](GFImpl):

@@ -46,7 +46,7 @@ class Poly:
 
 @mg.Gen
 def model(xs):
-    poly = quadratic @ "p"
+    poly = quadratic() @ "p"
     p_outlier = mg.Uniform(0.0, 0.3) @ "p_outlier"
     sigma_inlier = mg.Uniform(0.0, 0.3) @ "sigma_inlier"
     return (
@@ -57,7 +57,7 @@ def model(xs):
     )
 
 
-quadratic = coefficient().repeat(3).map(Poly)
+quadratic = coefficient.repeat(3).map(Poly)
 xs = jnp.arange(-3, 4) / 10.0
 key = jax.random.key(0)
 prior = jax.jit(model(xs).simulate)
