@@ -279,7 +279,7 @@ def test_localization():
     observations = to_constraint(tr)["steps"]["sensor"]["distance"]
     assert observations.shape == (len(robot_inputs["controls"]), len(sensor_angles))
 
-    constraint = {"steps": {"sensor": {"distance": observations}}}
+    constraint: Constraint = {"steps": {"sensor": {"distance": observations}}}
     key, sub_key = jax.random.split(key)
     tr, w = full_model.importance(sub_key, constraint)
     print(tr, w)
