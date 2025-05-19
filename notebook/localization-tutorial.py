@@ -1832,7 +1832,7 @@ mg.to_score(trace)
 # %%
 trace["retval"]
 # %% [markdown]
-# One can access from a trace the GF that produced it, along with with model parameters that were supplied.
+# One can access from a trace the GF that produced it, along with model parameters that were supplied.
 # NB: not in mini
 # %%
 # trace.get_gen_fn()

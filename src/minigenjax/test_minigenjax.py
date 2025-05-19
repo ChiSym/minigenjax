@@ -4,7 +4,7 @@ import math
 import jax
 import jax.numpy as jnp
 import pytest
-from minigenjax import *
+from . import *
 
 
 @Gen
@@ -693,7 +693,6 @@ def test_shaped_distribution():
     assert jnp.allclose(
         tr["retval"], jnp.array([2.9653215, 3.225159, 4.63303, 5.296382])
     )
-    print("a done")
     tr = jax.jit(f.repeat(3)(2.0).simulate)(key0)
     assert jnp.allclose(
         tr["retval"],
@@ -705,9 +704,7 @@ def test_shaped_distribution():
             ]
         ),
     )
-    print("b done")
     tr = f.vmap()(jnp.arange(2.0, 5.0)).simulate(key0)
-    print(tr)
     assert jnp.allclose(
         tr["retval"],
         jnp.array(

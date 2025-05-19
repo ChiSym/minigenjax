@@ -28,6 +28,8 @@ class Distribution(mg.GenPrimitive):
                 return self.tfd_ctor(*arg_tuple[1:]).sample(seed=arg_tuple[0])
             case "Score":
                 return self.tfd_ctor(*arg_tuple[1:]).log_prob(arg_tuple[0])
+            case _:
+                raise NotImplementedError(f"Distribution {self.name}.{op}")
 
     def abstract(self, *args, **kwargs):
         return jax.core.get_aval(
@@ -35,12 +37,12 @@ class Distribution(mg.GenPrimitive):
         )
 
     def concrete(self, *args, **kwargs):
-        axeses = kwargs.get("axes")
+        axes = kwargs.get("axes")
         op = kwargs["op"]
-        if axeses:
+        if axes:
             return functools.reduce(
                 lambda f, axes: jax.vmap(f, in_axes=axes),
-                axeses,
+                axes,
                 lambda *args: self.operation(args, op),
             )(*args)
         else:
@@ -84,7 +86,9 @@ class Distribution(mg.GenPrimitive):
 
             def sample(self, key: PRNGKeyArray):
                 return self.to_tfp().sample(seed=key)
-                return this.bind(key, *args, op="Sample", at="here")
+
+            def logpdf(self, v):
+                return self.to_tfp().log_prob(v)
 
             # TODO: from here, you can't `map` a distribution.
 

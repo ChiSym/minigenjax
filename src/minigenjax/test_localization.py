@@ -1,7 +1,8 @@
-from minigenjax import *
+from . import *
 import jax.numpy as jnp
 from jaxtyping import Array
 import jax
+import jax.random
 
 
 @pytree
@@ -139,6 +140,8 @@ def test_localization():
     key, sub_key = jax.random.split(key)
     target = joint_model().simulate(sub_key)
     target_pose = target["subtraces"]["pose"]["retval"]
+    assert jnp.allclose(target_pose.p, jnp.array([0.5866494, 0.08603191]))
+    assert jnp.allclose(target_pose.hd, jnp.array(-2.640037))
     target_readings = target["subtraces"]["sensor"]["subtraces"]["distance"]["retval"]
 
     key, sub_key = jax.random.split(key)
@@ -157,7 +160,40 @@ def test_localization():
     key, sub_key = jax.random.split(key)
     winners = jax.vmap(Categorical(logits=scores).sample)(jax.random.split(sub_key, 10))
     winning_poses = jax.tree.map(lambda v: v[winners], poses)
-    print(target_pose, winning_poses)
+    assert jnp.allclose(
+        winning_poses.p,
+        jnp.array(
+            [
+                [0.05307579, -0.6281314],
+                [0.08744526, -0.61947656],
+                [-0.6497958, -0.1409123],
+                [-0.602895, -0.04283571],
+                [-0.6497958, -0.1409123],
+                [-0.6497958, -0.1409123],
+                [0.11808324, -0.6313286],
+                [0.00331473, -0.64372396],
+                [0.08744526, -0.61947656],
+                [0.08744526, -0.61947656],
+            ]
+        ),
+    )
+    assert jnp.allclose(
+        winning_poses.hd,
+        jnp.array(
+            [
+                1.9847391,
+                2.063978,
+                0.54497504,
+                0.38564348,
+                0.54497504,
+                0.54497504,
+                1.9684818,
+                2.0597117,
+                2.063978,
+                2.063978,
+            ]
+        ),
+    )
 
     @Gen
     def step_model(motion_settings, start, control):
@@ -282,4 +318,4 @@ def test_localization():
     constraint: Constraint = {"steps": {"sensor": {"distance": observations}}}
     key, sub_key = jax.random.split(key)
     tr, w = full_model.importance(sub_key, constraint)
-    print(tr, w)
+    # print(tr, w)

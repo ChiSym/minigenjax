@@ -5,8 +5,8 @@ import jax.tree
 import jax.api_util
 import jax.numpy as jnp
 from jax.interpreters import batching
-from minigenjax.key import KeySplit
-from minigenjax.trace import to_constraint, to_score, to_weight
+from .key import KeySplit
+from .trace import to_constraint, to_score, to_weight
 import jax.extend as jx
 import jax.core
 from jaxtyping import Array, ArrayLike, PRNGKeyArray, Float, PyTreeDef
@@ -14,16 +14,9 @@ from jaxtyping import Array, ArrayLike, PRNGKeyArray, Float, PyTreeDef
 
 # %%
 Address = tuple[str, ...]
-Constraint = dict[str, "ArrayLike|Constraint"]
+Constraint = dict[str, "ArrayLike | Constraint"]
 PHANTOM_KEY = jax.random.key(987654321)
 InAxesT = int | tuple[int | None, ...] | None
-
-WrappedFunWithAux = tuple[jx.linear_util.WrappedFun, Callable[[], Any]]
-
-# Wrapper to assign a correct type.
-flatten_fun_nokwargs: Callable[[jx.linear_util.WrappedFun, Any], WrappedFunWithAux] = (
-    jax.api_util.flatten_fun_nokwargs  # pyright: ignore[reportAssignmentType]
-)
 
 
 class MissingConstraint(Exception):
@@ -81,21 +74,21 @@ class GenPrimitive(jx.core.Primitive):
 
 # %%
 class Gen[R]:
-    def __init__(self, f: Callable[..., R], partial_args=()):
+    def __init__(self, f: Callable[..., R] | None = None):
         self.f = f
-        self.partial_args = partial_args
 
     def get_name(self) -> str:
         return self.f.__name__
 
     def __call__(self, *args) -> "GFI":
-        return GFA(self.f, args, partial_args=self.partial_args)
+        return GFA(self.f, args)
 
     def repeat(self, n):
         this = self
 
         class ToRepeat(Gen):
             def __init__(self, n):
+                super().__init__()
                 self.n = n
 
             def __call__(self, *args):
@@ -108,6 +101,7 @@ class Gen[R]:
 
         class ToVmap(Gen):
             def __init__(self, in_axes):
+                super().__init__()
                 self.in_axes = in_axes
 
             def __call__(self, *args):
@@ -120,6 +114,7 @@ class Gen[R]:
 
         class ToMap(Gen):
             def __init__(self, g):
+                super().__init__()
                 self.g = g
 
             def __call__(self, *args):
@@ -132,7 +127,7 @@ class Gen[R]:
 
         class ToScan(Gen):
             def __init__(self):
-                pass
+                super().__init__()
 
             def __call__(self, *args):
                 return ScanA(args, this)
@@ -144,6 +139,7 @@ class Gen[R]:
 
         class ToPartial(Gen):
             def __init__(self, partial_args):
+                super().__init__()
                 self.partial_args = partial_args
 
             def __call__(self, *args):
@@ -191,7 +187,7 @@ class GFI[R]:
 
 
 class GFA[R](GFI[R]):
-    def __init__(self, f, args, partial_args):
+    def __init__(self, f: Callable[..., R], args):
         super().__init__(f"GF[{f.__name__}]")
         self.f = f
         self.args = args
@@ -217,7 +213,7 @@ class PartialA(GFI):
         self.partial_args = partial_args
         self.args = args
         self.gfa = next(*self.partial_args, *self.args)
-        self.name = f"Partial[{self.gfa.name}]"
+        super().__init__(f"Partial[{self.gfa.name}]")
 
     def get_impl(self):
         return PartialGF(self.partial_args, self.gfa)
@@ -280,6 +276,7 @@ class ScanA(GFI):
         self.multiple_results = True
         # fixed_args = (arg_tuple[0], jax.tree.map(lambda v: v[0], arg_tuple[1]))
         self.gfa = nxt(args[0], jax.tree.map(lambda v: v[0], args[1]))
+        super().__init__(f"Scan[{self.gfa.name}]")
 
     def get_impl(self):
         return ScanGF(self.gfa)
@@ -315,9 +312,8 @@ class MapA[R](GFI):
         self.arg_tuple = arg_tuple
         _, self.in_tree = jax.tree.flatten(self.arg_tuple)
         self.inner = next(*arg_tuple)
-        self.name = f"Map[{g.__name__}, {self.inner.name}]"
-        with jax.checking_leaks():
-            self.shape = jax.eval_shape(lambda: self.g(self.inner @ "a"))
+        super().__init__(f"Map[{g.__name__}, {self.inner.name}]")
+        self.shape = jax.eval_shape(lambda: self.g(self.inner @ "a"))
 
         self.abstract_value = jax.tree.map(
             jax.core.get_aval, jax.tree.flatten(self.shape)[0]
@@ -334,12 +330,6 @@ class MapA[R](GFI):
     def get_structure(self):
         return self.structure
 
-    # doing this short circuits the impl, so that MapGF doesn't get into the
-    # jaxpr. Fixing this would mean learning the structure that is produced by
-    # g.
-    # def __matmul__(self, address: str):
-    #     return self.g(self.inner @ address)
-
 
 class VmapA[R](GFI):
     def __init__(self, in_axes: InAxesT, args: tuple, nxt):
@@ -355,7 +345,7 @@ class VmapA[R](GFI):
             self.p_index, self.an_axis = 0, self.in_axes
         self.n = args[self.p_index].shape[self.an_axis]
         self.inner = nxt(*self.un_vmap_arguments(args))
-        self.name = f"VMap[in_axes={in_axes}, {self.inner.name}]"
+        super().__init__(f"VMap[in_axes={in_axes}, {self.inner.name}]")
 
     def un_vmap_arguments(self, arg_tuple):
         def un_vmap(axis, arg):
@@ -382,7 +372,7 @@ class VmapA[R](GFI):
 
 
 class GFB[R](GFImpl):
-    def __init__(self, f, shape):
+    def __init__(self, f: Callable[..., R], shape):
         super().__init__(f"GFB[{f.__name__}]")
         self.f = f
         self.abstract_value = jax.tree.map(
@@ -581,15 +571,6 @@ class Simulate(Transformation[dict]):
         self.w = jnp.array(0.0)
 
     def record(self, sub_trace, at):
-        if (
-            (inner_trace := sub_trace.get("subtraces"))
-            and len(keys := inner_trace.keys()) == 1
-            and (key := next(iter(keys))).startswith("__")
-        ):
-            raise Exception("foo")
-            # absorb interstitial trace points like __repeat, __vmap that may
-            # occur when combinators are stacked.
-            sub_trace["subtraces"] = inner_trace[key]["subtraces"]
         if at:
             self.trace[at] = sub_trace
         self.w += jnp.sum(sub_trace.get("w", 0.0))
@@ -688,9 +669,9 @@ class ScanGF[R](GFImpl):
         # fixed_args = (arg_tuple[0], jax.tree.map(lambda v: v[0], arg_tuple[1]))
         # gfi = self.g(*fixed_args)
 
-        def step(carry_key, step_contraint):
+        def step(carry_key, step_constraint):
             carry, key = carry_key
-            step, constraint = step_contraint
+            step, constraint = step_constraint
             key, k1 = KeySplit.bind(key, a="scan_step")
             v = self.inner_impl.simulate_p(k1, (carry, step), address, constraint)
             return (v["retval"][0], key), v

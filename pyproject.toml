@@ -15,7 +15,6 @@ tensorflow-probability = {extras = ["jax"], version = "^0.25.0"}
 jax = "0.4.38"
 jaxtyping = "^0.2.34"
 numpy = "<2.0.0"
-dm-tree = "0.1.8"
 
 [tool.poetry.group.dev.dependencies]
 ipykernel = "^6.29.5"
