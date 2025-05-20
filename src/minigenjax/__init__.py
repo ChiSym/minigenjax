@@ -1,9 +1,10 @@
 from .core import (
     Gen,
     Cond,
-    MissingConstraint,
     Constraint,
 )
+
+from .transform import MissingConstraint
 
 from .distribution import (
     Flip,

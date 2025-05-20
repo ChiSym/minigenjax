@@ -1,14 +1,15 @@
 import functools
-import minigenjax.core as mg
 import jax
 import jax.core
+from .types import PHANTOM_KEY, Constraint, Address
+from .primitive import GenPrimitive
 from jax.interpreters import mlir
 from jaxtyping import Array, PRNGKeyArray, Float, DTypeLike
 import tensorflow_probability.substrates.jax as tfp
 import jax.numpy as jnp
 
 
-class Distribution(mg.GenPrimitive):
+class Distribution(GenPrimitive):
     def __init__(self, name, tfd_ctor, dtype: DTypeLike = jnp.dtype("float32")):
         super().__init__(name)
         self.tfd_ctor = tfd_ctor
@@ -52,8 +53,8 @@ class Distribution(mg.GenPrimitive):
         self,
         key: PRNGKeyArray,
         arg_tuple: tuple,
-        address: mg.Address,
-        constraint: mg.Constraint | None,
+        address: Address,
+        constraint: Constraint | None,
     ):
         if constraint is not None:  # TODO: fishy
             score = self.bind(constraint, *arg_tuple[1:], op="Score")
@@ -67,7 +68,7 @@ class Distribution(mg.GenPrimitive):
     def assess_p(
         self,
         arg_tuple: tuple,
-        constraint: mg.Constraint | Float,
+        constraint: Constraint | Float,
         address: tuple[str, ...],
     ) -> tuple[Array, Array]:
         assert not isinstance(constraint, dict)
@@ -79,7 +80,7 @@ class Distribution(mg.GenPrimitive):
 
         class Binder:
             def __matmul__(self, address: str):
-                return this.bind(mg.PHANTOM_KEY, *args, op="Sample", at=address)
+                return this.bind(PHANTOM_KEY, *args, op="Sample", at=address)
 
             def to_tfp(self):
                 return this.tfd_ctor(*args)

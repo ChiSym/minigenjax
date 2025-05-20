@@ -1,75 +1,21 @@
 # %%
-from typing import Any, Callable
+from typing import Callable
 import jax
 import jax.tree
 import jax.api_util
 import jax.numpy as jnp
-from jax.interpreters import batching
 from .key import KeySplit
+from .types import InAxesT
+from .primitive import GenPrimitive
+from .simulate import Simulate
+from .assess import Assess
 from .trace import to_constraint, to_score, to_weight
-import jax.extend as jx
+from minigenjax.types import Address, Constraint
 import jax.core
-from jaxtyping import Array, ArrayLike, PRNGKeyArray, Float, PyTreeDef
+from jaxtyping import Array, PRNGKeyArray, Float, PyTreeDef
 
 
 # %%
-Address = tuple[str, ...]
-Constraint = dict[str, "ArrayLike | Constraint"]
-PHANTOM_KEY = jax.random.key(987654321)
-InAxesT = int | tuple[int | None, ...] | None
-
-
-class MissingConstraint(Exception):
-    pass
-
-
-class GenPrimitive(jx.core.Primitive):
-    def __init__(self, name):
-        super().__init__(name)
-        self.def_abstract_eval(self.abstract)
-        self.def_impl(self.concrete)
-        batching.primitive_batchers[self] = self.batch
-
-    def abstract(self, *args, **kwargs):
-        raise NotImplementedError(f"abstract: {self}")
-
-    def concrete(self, *args, **kwargs):
-        raise NotImplementedError(f"concrete: {self}")
-
-    def batch(
-        self,
-        vector_args,
-        batch_axes: InAxesT,
-        **kwargs,
-    ) -> tuple[Any, InAxesT]:
-        # TODO assert all axes equal
-        result = jax.vmap(lambda *args: self.impl(*args, **kwargs), in_axes=batch_axes)(
-            *vector_args
-        )
-        return result, batch_axes
-
-    def simulate_p(
-        self,
-        key: PRNGKeyArray,
-        arg_tuple: tuple,
-        address: Address,
-        constraint: Constraint,
-    ) -> dict:
-        raise NotImplementedError(f"simulate_p: {self}")
-
-    def assess_p(
-        self, arg_tuple: tuple, constraint: Constraint | Float, address: tuple[str, ...]
-    ) -> tuple[Array, Any]:
-        raise NotImplementedError(f"assess_p: {self}")
-
-    def get_args(self) -> tuple:
-        raise NotImplementedError(f"get_args: {self}")
-
-    def inflate(self, v: Any, n: int):
-        def inflate_one(v):
-            return v.update(shape=(n,) + v.shape)
-
-        return jax.tree.map(inflate_one, v)
 
 
 # %%
@@ -78,9 +24,13 @@ class Gen[R]:
         self.f = f
 
     def get_name(self) -> str:
-        return self.f.__name__
+        return self.f.__name__ if self.f else "?"
 
     def __call__(self, *args) -> "GFI":
+        assert self.f is not None
+        # TODO: fix this so that the base class isn't holding the reference to f.
+        # Maybe there should be a constructor function and a class, and we're
+        # working too hard to overload this
         return GFA(self.f, args)
 
     def repeat(self, n):
@@ -444,188 +394,6 @@ class RepeatGF[R](GFImpl):
     def abstract(self, *args, **kwargs):
         ia = self.repeated.abstract(*args, **kwargs)
         return jax.tree.map(lambda a: a.update(shape=(self.n,) + a.shape), ia)
-
-
-class Transformation[R]:
-    def __init__(self, key: PRNGKeyArray, address: Address, constraint: Constraint):
-        self.key = key
-        self.address = address
-        self.constraint = constraint
-
-    def handle_eqn(self, eqn, params, bind_params):
-        return eqn.primitive.bind(*params, **bind_params)
-
-    def get_sub_key(self):
-        if self.key_consumer_count > 1:
-            self.key, sub_key = KeySplit.bind(self.key)
-        elif self.key_consumer_count == 1:
-            sub_key = self.key
-        else:
-            raise Exception("more sub_key requests than expected")
-        self.key_consumer_count -= 1
-        return sub_key
-
-    def run(
-        self,
-        closed_jaxpr: jx.core.ClosedJaxpr,
-        arg_tuple,
-        structure: jax.tree_util.PyTreeDef | None = None,
-    ):
-        jaxpr = closed_jaxpr.jaxpr
-        flat_args, in_tree = jax.tree.flatten(arg_tuple)
-        env: dict[jx.core.Var, Any] = {}
-
-        def read(v: jax.core.Atom) -> Any:
-            return v.val if isinstance(v, jx.core.Literal) else env[v]
-
-        def write(v: jx.core.Var, val: Any) -> None:
-            # if config.enable_checks.value and not config.dynamic_shapes.value:
-            #   assert typecheck(v.aval, val), (v.aval, val)
-            env[v] = val
-
-        jax.util.safe_map(write, jaxpr.constvars, closed_jaxpr.consts)
-        jax.util.safe_map(write, jaxpr.invars, flat_args)
-
-        # count the number of PRNG keys that will be consumed during the
-        # evaluation of this JAXPR alone. We assume that the key that we
-        # were provided with is good for one random number generation. If
-        # there's only one key consumer in this JAXPR, then there's no need
-        # to split it.
-        self.key_consumer_count = sum(
-            isinstance(eqn.primitive, GenPrimitive) or eqn.primitive is jax.lax.cond_p
-            for eqn in jaxpr.eqns
-        )
-
-        for eqn in jaxpr.eqns:
-            sub_fns, bind_params = eqn.primitive.get_bind_params(eqn.params)
-            if sub_fns:
-                raise NotImplementedError("nonempty sub_fns")
-            # name_stack = source_info_util.current_name_stack() + eqn.source_info.name_stack
-            # traceback = eqn.source_info.traceback if propagate_source_info else None
-            # with source_info_util.user_context(
-            #    traceback, name_stack=name_stack), eqn.ctx.manager:
-            params = tuple(jax.util.safe_map(read, eqn.invars))
-            ans = self.handle_eqn(eqn, params, bind_params)
-            jax.util.safe_map(write, eqn.outvars, jax.tree.flatten(ans)[0])
-            # clean_up_dead_vars(eqn, env, lu)
-        retval = jax.util.safe_map(read, jaxpr.outvars)
-        if structure is not None:
-            retval = jax.tree.unflatten(structure, retval)
-        else:
-            pass
-        return self.construct_retval(retval)
-
-    def address_from_branch(self, b: jx.core.ClosedJaxpr):
-        """Look at the given JAXPR and find out if it is a single-instruction
-        call to a GF traced to an address. If so, return that address. This is
-        used to detect when certain JAX primitives (e.g., `scan_p`, `cond_p`)
-        have been applied directly to traced generative functions, in which case
-        the current transformation should be propagated to the jaxpr within."""
-        if len(b.jaxpr.eqns) == 1 and isinstance(
-            b.jaxpr.eqns[0].primitive, GenPrimitive
-        ):
-            return b.jaxpr.eqns[0].params.get("at")
-
-    def get_sub_constraint(self, a: str, required: bool = False) -> Constraint | Float:
-        if self.constraint is None:
-            c = None
-        else:
-            c = self.constraint.get(a)
-        if required and c is None:
-            raise MissingConstraint(self.address + (a,))
-        return c
-
-    def construct_retval(self, retval) -> R:
-        return retval
-
-
-class Assess[R](Transformation[R]):
-    def __init__(self, address: Address, constraint: Constraint):
-        super().__init__(PHANTOM_KEY, address, constraint)
-        self.score = jnp.array(0.0)
-
-    def handle_eqn(self, eqn: jx.core.JaxprEqn, params, bind_params):
-        if isinstance(eqn.primitive, GenPrimitive):
-            at = bind_params["at"]
-            addr = self.address + (at,)
-            if in_tree := bind_params.get("in_tree"):
-                params = jax.tree.unflatten(in_tree, params)
-            score, ans = eqn.primitive.assess_p(
-                params, self.get_sub_constraint(at, required=True), addr
-            )
-            self.score += jnp.sum(score)
-            return ans
-
-        return super().handle_eqn(eqn, params, bind_params)
-
-
-class Simulate(Transformation[dict]):
-    def __init__(
-        self,
-        key: PRNGKeyArray,
-        address: Address,
-        constraint: Constraint,
-    ):
-        super().__init__(key, address, constraint)
-        self.trace = {}
-        self.w = jnp.array(0.0)
-
-    def record(self, sub_trace, at):
-        if at:
-            self.trace[at] = sub_trace
-        self.w += jnp.sum(sub_trace.get("w", 0.0))
-        return sub_trace["retval"]
-
-    def handle_eqn(self, eqn: jx.core.JaxprEqn, params, bind_params):
-        if isinstance(eqn.primitive, GenPrimitive):
-            at = bind_params["at"]
-            if in_tree := bind_params.get("in_tree"):
-                params = jax.tree.unflatten(in_tree, params)
-            addr = self.address + (at,)
-            ans = eqn.primitive.simulate_p(
-                self.get_sub_key(),
-                params,
-                addr,
-                self.get_sub_constraint(at),
-            )
-            return self.record(ans, at)
-
-        if eqn.primitive is jax.lax.cond_p:
-            branches = bind_params["branches"]
-
-            branch_addresses = tuple(map(self.address_from_branch, branches))
-            if branch_addresses[0] and all(
-                b == branch_addresses[0] for b in branch_addresses[1:]
-            ):
-                sub_address = branch_addresses[0]
-            else:
-                sub_address = None
-
-            # TODO: is it OK to pass the same sub_key to both sides?
-            # NB! branches[0] is the false branch, [1] is the true branch,
-            sub_key = self.get_sub_key()
-            ans = jax.lax.cond(
-                params[0],
-                lambda: Simulate(sub_key, self.address, self.constraint).run(
-                    branches[1], params[1:]
-                ),
-                lambda: Simulate(sub_key, self.address, self.constraint).run(
-                    branches[0], params[1:]
-                ),
-            )
-            if sub_address:
-                self.trace[sub_address] = ans["subtraces"][sub_address]
-
-            self.w += jnp.sum(ans.get("w", 0))
-            return ans["retval"]
-
-        return super().handle_eqn(eqn, params, bind_params)
-
-    def construct_retval(self, retval):
-        r = {"retval": retval, "subtraces": self.trace}
-        if self.constraint:
-            r["w"] = self.w
-        return r
 
 
 # %%
