@@ -3,6 +3,7 @@ from .types import Address, Constraint
 from .key import KeySplit
 from .primitive import GenPrimitive
 import jax
+import jax.numpy as jnp
 import jax.extend as jx
 from typing import Any
 
@@ -103,3 +104,52 @@ class Transformation[R]:
 
     def construct_retval(self, retval) -> R:
         return retval
+
+
+class TracingTransform(Transformation[dict]):
+    def __init__(self, key: PRNGKeyArray, address: Address, constraint: Constraint):
+        super().__init__(key, address, constraint)
+        self.trace = {}
+        self.w = jnp.array(0.0)
+
+    def record(self, sub_trace, at):
+        self.trace[at] = sub_trace
+        self.w += jnp.sum(sub_trace.get("w", 0.0))
+        return sub_trace["retval"]
+
+    def handle_eqn(self, eqn: jx.core.JaxprEqn, params, bind_params):
+        if eqn.primitive is jax.lax.cond_p:
+            branches = bind_params["branches"]
+
+            branch_addresses = tuple(map(self.address_from_branch, branches))
+            if branch_addresses[0] and all(
+                b == branch_addresses[0] for b in branch_addresses[1:]
+            ):
+                sub_address = branch_addresses[0]
+            else:
+                sub_address = None
+
+            # TODO: is it OK to pass the same sub_key to both sides?
+            # NB! branches[0] is the false branch, [1] is the true branch,
+            sub_key = self.get_sub_key()
+            ans = jax.lax.cond(
+                params[0],
+                lambda: self.make_inner(sub_key).run(branches[1], params[1:]),
+                lambda: self.make_inner(sub_key).run(branches[0], params[1:]),
+            )
+            if sub_address:
+                self.trace[sub_address] = ans["subtraces"][sub_address]
+
+            self.w += jnp.sum(ans.get("w", 0))
+            return ans["retval"]
+        else:
+            return super().handle_eqn(eqn, params, bind_params)
+
+    def make_inner(self, key: PRNGKeyArray):
+        raise NotImplementedError()
+
+    def construct_retval(self, retval):
+        r = {"retval": retval, "subtraces": self.trace}
+        if self.constraint:
+            r["w"] = self.w
+        return r
