@@ -56,13 +56,33 @@ class Distribution(GenPrimitive):
         address: Address,
         constraint: Constraint | None,
     ):
-        if constraint is not None:  # TODO: fishy
+        if constraint is not None:
             score = self.bind(constraint, *arg_tuple[1:], op="Score")
             ans = {"w": score, "retval": constraint}
         else:
             retval = self.bind(key, *arg_tuple[1:], op="Sample")
             score = self.bind(retval, *arg_tuple[1:], op="Score")
             ans = {"retval": retval, "score": score}
+        return ans
+
+    def update_p(
+        self,
+        key: PRNGKeyArray,
+        arg_tuple: tuple,
+        address: Address,
+        constraint: Constraint | None,
+        previous_trace: dict,
+    ):
+        print(f"update_p {arg_tuple} {address} {constraint} {previous_trace}")
+        if constraint is not None:
+            new_score = self.bind(constraint, *arg_tuple[1:], op="Score")
+            ans = {
+                "w": new_score - previous_trace["score"],
+                "retval": constraint,
+                "score": new_score,
+            }
+        else:
+            ans = previous_trace
         return ans
 
     def assess_p(

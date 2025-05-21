@@ -5,6 +5,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 from . import *
+from .trace import to_weight
 
 
 @Gen
@@ -511,22 +512,9 @@ class TestCurve:
             poly = quadratic() @ "p"
             return poly(x)
 
-        # print(jax.make_jaxpr(one_model(0.0).simulate)(key0))
-
         tr = one_model(0.0).simulate(key0)
         assert tr["retval"] == 1.1188384
-
-        # assert isinstance(tr["subtraces"]["p"]["retval"], Poly)
-        #
-        # One might wish this were true, but what happens is that JAX tracing
-        # simply takes the output of quadratic and evaluates it at x without
-        # constructing the intermediate polynomial object. This could be
-        # considered a feature or a bug depending on how you look at it.
-        # The JAXPR above begins with
-        # { lambda ; a:f32[]. let
-        #    b:f32[3] = RepeatGF[3, coefficient][at=p in_tree=PyTreeDef(())]
-        # and so the MapGF object is not bound during the jit. This is ultimately
-        # because MapA's __matmul__ operation delegates to the inner function.
+        assert isinstance(tr["subtraces"]["p"]["retval"], Poly)
 
         @Gen
         def model(xs):
@@ -948,6 +936,9 @@ def test_bernoulli():
     with pytest.raises(ValueError):
         Bernoulli()
 
+    with pytest.raises(TypeError):
+        Bernoulli(0.1)  # type: ignore
+
     with pytest.raises(ValueError):
         Bernoulli(logits=-1, probs=0.5)
 
@@ -1044,4 +1035,35 @@ def test_categorial_jaxpr():
     # if someone does their own vmap over Categorical, vmap passes over the
     # primitive boundary, since the distribution isn't being used generatively.
 
-    # %%
+
+def test_gen_paper_update():
+    @Gen
+    def inner1(val):
+        return jnp.logical_and(Bernoulli(probs=0.6) @ "c", val)
+
+    @Gen
+    def inner2(val):
+        # was d, but the restrictions around Cond are strict.
+        # the branches have to generate data with the same
+        return jnp.logical_and(Bernoulli(probs=0.1) @ "c", val)
+
+    @Gen
+    def foo():
+        val = Bernoulli(probs=0.3) @ "a"
+        val = Cond(inner1(val), inner2(val))(Bernoulli(probs=0.4) @ "b") @ "x"
+        val = jnp.logical_and(Bernoulli(probs=0.7) @ "e", val)
+        return val
+
+    # roll the dice until we get the configuration illustrated in figure 3 of the paper
+    key = key0
+    while True:
+        key, sub_key = jax.random.split(key)
+        tr = foo().simulate(sub_key)
+        ch = to_constraint(tr)
+        if ch["a"] == 0 and ch["b"] == 1 and ch["x"]["c"] == 0 and ch["e"] == 1:
+            break
+
+    assert jnp.exp(to_score(tr)) == pytest.approx(0.0784)
+    u = {"b": 0, "x": {"c": 1}}
+    tr2 = foo().update(sub_key, u, tr)
+    assert jnp.exp(to_weight(tr2)) == pytest.approx(0.375)

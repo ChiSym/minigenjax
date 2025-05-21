@@ -19,6 +19,7 @@ from .distribution import (
 from .trace import (
     to_constraint,
     to_score,
+    to_weight,
 )
 
 from .pytree import pytree as pytree
@@ -31,6 +32,7 @@ __all__ = [
     "Flip",
     "to_constraint",
     "to_score",
+    "to_weight",
     "Constraint",
     "Categorical",
     "Bernoulli",

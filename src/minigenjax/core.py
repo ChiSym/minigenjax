@@ -8,6 +8,7 @@ from .key import KeySplit
 from .types import InAxesT
 from .primitive import GenPrimitive
 from .simulate import Simulate
+from .update import Update
 from .assess import Assess
 from .trace import to_constraint, to_score, to_weight
 from minigenjax.types import Address, Constraint
@@ -102,8 +103,15 @@ class GFI[R]:
     def __init__(self, name):
         self.name = name
 
-    def simulate(self, key: PRNGKeyArray):
+    def simulate(self, key: PRNGKeyArray) -> dict:
         return self.get_impl().simulate_p(key, self.get_args(), (), {})
+
+    def update(
+        self, key: PRNGKeyArray, constraint: Constraint, previous_trace: dict
+    ) -> dict:
+        return self.get_impl().update_p(
+            key, self.get_args(), (), constraint, previous_trace
+        )
 
     def assess(self, constraint) -> tuple[Array, Array]:
         return self.get_impl().assess_p(self.get_args(), constraint, ())
@@ -347,6 +355,22 @@ class GFB[R](GFImpl):
             j, shape = jax.make_jaxpr(self.f, return_shape=True)(*arg_tuple)
         structure = jax.tree.structure(shape)
         return Simulate(key, address, constraint).run(j, arg_tuple, structure)
+
+    def update_p(
+        self,
+        key: PRNGKeyArray,
+        arg_tuple: tuple,
+        address: Address,
+        constraint: Constraint,
+        previous_trace: dict,
+    ):
+        # TODO: move to ctor
+        with jax.check_tracer_leaks():
+            j, shape = jax.make_jaxpr(self.f, return_shape=True)(*arg_tuple)
+        structure = jax.tree.structure(shape)
+        return Update(key, address, constraint, previous_trace).run(
+            j, arg_tuple, structure
+        )
 
     def assess_p(
         self, arg_tuple: tuple, constraint: Constraint, address

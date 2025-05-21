@@ -40,6 +40,16 @@ class GenPrimitive(jx.core.Primitive):
     ) -> dict:
         raise NotImplementedError(f"simulate_p: {self}")
 
+    def update_p(
+        self,
+        key: PRNGKeyArray,
+        arg_tuple: tuple,
+        address: Address,
+        constraint: Constraint,
+        previous_trace: dict,
+    ) -> dict:
+        raise NotImplementedError(f"update_p: {self}")
+
     def assess_p(
         self, arg_tuple: tuple, constraint: Constraint | Float, address: tuple[str, ...]
     ) -> tuple[Array, Any]:
