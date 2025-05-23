@@ -397,7 +397,7 @@ def test_intervening_functions():
     assert tr["subtraces"]["g"]["retval"] == tr["retval"]
 
 
-def test_scan_model():
+class TestScan:
     @Gen
     def update(state, delta):
         drift = Normal(delta, 0.01) @ "drift"
@@ -406,36 +406,66 @@ def test_scan_model():
 
     @Gen
     def scan_update():
-        return update.scan()(10.0, jnp.arange(0.1, 0.6, 0.1)) @ "S"
+        return TestScan.update.scan()(10.0, jnp.arange(0.1, 0.6, 0.1)) @ "S"
 
-    tr = update.scan()(10.0, jnp.arange(0.1, 0.6, 0.1)).simulate(key0)
-    print(f"final tr {tr}")
-    assert jnp.allclose(tr["retval"][0], 11.482168)
-    assert jnp.allclose(
-        tr["retval"][1],
-        jnp.array([10.087484, 10.281618, 10.586483, 10.988654, 11.482168]),
-    )
-    assert jnp.allclose(
-        tr["subtraces"]["drift"]["retval"],
-        jnp.array([0.08748461, 0.19413349, 0.30486485, 0.4021714, 0.49351367]),
-    )
-    assert jnp.allclose(
-        tr["subtraces"]["drift"]["score"],
-        jnp.array([2.903057, 3.514152, 3.5678985, 3.6626565, 3.4758694]),
-    )
-    tr = scan_update().simulate(key0)
-    assert jnp.allclose(
-        tr["retval"][1],
-        jnp.array([10.087484, 10.281618, 10.586483, 10.988654, 11.482168]),
-    )
-    assert jnp.allclose(
-        tr["subtraces"]["S"]["subtraces"]["drift"]["retval"],
-        jnp.array([0.08748461, 0.19413349, 0.30486485, 0.4021714, 0.49351367]),
-    )
-    assert jnp.allclose(
-        tr["subtraces"]["S"]["subtraces"]["drift"]["score"],
-        jnp.array([2.903057, 3.514152, 3.5678985, 3.6626565, 3.4758694]),
-    )
+    def test_scan_model(self):
+        tr = TestScan.update.scan()(10.0, jnp.arange(0.1, 0.6, 0.1)).simulate(key0)
+        assert jnp.allclose(tr["retval"][0], 11.482168)
+        assert jnp.allclose(
+            tr["retval"][1],
+            jnp.array([10.087484, 10.281618, 10.586483, 10.988654, 11.482168]),
+        )
+        assert jnp.allclose(
+            tr["subtraces"]["drift"]["retval"],
+            jnp.array([0.08748461, 0.19413349, 0.30486485, 0.4021714, 0.49351367]),
+        )
+        assert jnp.allclose(
+            tr["subtraces"]["drift"]["score"],
+            jnp.array([2.903057, 3.514152, 3.5678985, 3.6626565, 3.4758694]),
+        )
+        tr = TestScan.scan_update().simulate(key0)
+        assert jnp.allclose(
+            tr["retval"][1],
+            jnp.array([10.087484, 10.281618, 10.586483, 10.988654, 11.482168]),
+        )
+        assert jnp.allclose(
+            tr["subtraces"]["S"]["subtraces"]["drift"]["retval"],
+            jnp.array([0.08748461, 0.19413349, 0.30486485, 0.4021714, 0.49351367]),
+        )
+        assert jnp.allclose(
+            tr["subtraces"]["S"]["subtraces"]["drift"]["score"],
+            jnp.array([2.903057, 3.514152, 3.5678985, 3.6626565, 3.4758694]),
+        )
+
+    # @pytest.mark.skip(reason="after we fix the base case")
+    def test_scan_update(self):
+        model = TestScan.update.scan()(10.0, jnp.arange(0.1, 0.6, 0.1))
+        tr = model.simulate(key0)
+        assert jnp.allclose(tr["retval"][0], 11.482168)
+        assert jnp.allclose(
+            tr["retval"][1],
+            jnp.array([10.087484, 10.281618, 10.586483, 10.988654, 11.482168]),
+        )
+        assert jnp.allclose(
+            tr["subtraces"]["drift"]["retval"],
+            jnp.array([0.08748461, 0.19413349, 0.30486485, 0.4021714, 0.49351367]),
+        )
+        key, sub_key = jax.random.split(key0)
+        choices = to_constraint(tr)
+        tru = model.update(sub_key, choices, tr)
+        assert jnp.allclose(tru["retval"][0], 11.482168)
+        assert jnp.allclose(to_weight(tru), 0.0)
+        new_choices = {"drift": choices["drift"].at[1].set(0.2)}
+        trv = model.update(sub_key, new_choices, tr)
+        assert jnp.allclose(to_weight(trv), 0.17207956)
+        assert jnp.allclose(
+            trv["subtraces"]["drift"]["retval"],
+            jnp.array([0.08748461, 0.2, 0.30486485, 0.4021714, 0.49351367]),
+        )
+        assert jnp.allclose(
+            trv["retval"][1],
+            jnp.array([10.087484, 10.287484, 10.592349, 10.99452, 11.488034]),
+        )
 
 
 def test_plain_scan():

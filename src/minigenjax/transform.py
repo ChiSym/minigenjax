@@ -31,6 +31,12 @@ class Transformation[R]:
         self.key_consumer_count -= 1
         return sub_key
 
+    def run_f(self, f, arg_tuple):
+        with jax.check_tracer_leaks():
+            j, shape = jax.make_jaxpr(f, return_shape=True)(*arg_tuple)
+        structure = jax.tree.structure(shape)
+        return self.run(j, arg_tuple, structure)
+
     def run(
         self,
         closed_jaxpr: jx.core.ClosedJaxpr,

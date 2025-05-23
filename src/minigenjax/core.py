@@ -10,7 +10,7 @@ from .primitive import GenPrimitive
 from .simulate import Simulate
 from .update import Update
 from .assess import Assess
-from .trace import to_constraint, to_score, to_weight
+from .trace import to_constraint, to_score, to_weight, to_subtraces
 from minigenjax.types import Address, Constraint
 import jax.core
 from jaxtyping import Array, PRNGKeyArray, Float, PyTreeDef
@@ -351,10 +351,7 @@ class GFB[R](GFImpl):
         address: Address,
         constraint: Constraint,
     ) -> dict:
-        with jax.check_tracer_leaks():
-            j, shape = jax.make_jaxpr(self.f, return_shape=True)(*arg_tuple)
-        structure = jax.tree.structure(shape)
-        return Simulate(key, address, constraint).run(j, arg_tuple, structure)
+        return Simulate(key, address, constraint).run_f(self.f, arg_tuple)
 
     def update_p(
         self,
@@ -364,22 +361,13 @@ class GFB[R](GFImpl):
         constraint: Constraint,
         previous_trace: dict,
     ):
-        # TODO: move to ctor
-        with jax.check_tracer_leaks():
-            j, shape = jax.make_jaxpr(self.f, return_shape=True)(*arg_tuple)
-        structure = jax.tree.structure(shape)
-        return Update(key, address, constraint, previous_trace).run(
-            j, arg_tuple, structure
-        )
+        return Update(key, address, constraint, previous_trace).run_f(self.f, arg_tuple)
 
     def assess_p(
         self, arg_tuple: tuple, constraint: Constraint, address
     ) -> tuple[Float, R]:
-        with jax.check_tracer_leaks():
-            j, shape = jax.make_jaxpr(self.f, return_shape=True)(*arg_tuple)
-        structure = jax.tree.structure(shape)
         a = Assess[R](address, constraint)
-        retval = a.run(j, arg_tuple, structure)
+        retval = a.run_f(self.f, arg_tuple)
         return a.score, retval
 
 
@@ -458,9 +446,6 @@ class ScanGF[R](GFImpl):
         address: tuple[str, ...],
         constraint: Constraint,
     ) -> dict:
-        # fixed_args = (arg_tuple[0], jax.tree.map(lambda v: v[0], arg_tuple[1]))
-        # gfi = self.g(*fixed_args)
-
         def step(carry_key, step_constraint):
             carry, key = carry_key
             step, constraint = step_constraint
@@ -469,6 +454,30 @@ class ScanGF[R](GFImpl):
             return (v["retval"][0], key), v
 
         ans = jax.lax.scan(step, (arg_tuple[0], key), (arg_tuple[1], constraint))
+        # Fix the return values to report the things an ordinary use of
+        # scan would produce.
+        ans[1]["retval"] = (ans[0][0], ans[1]["retval"][0])
+        return ans[1]
+
+    def update_p(
+        self,
+        key: Array,
+        arg_tuple: tuple,
+        address: tuple[str, ...],
+        constraint: Constraint,
+        previous_trace: dict,
+    ) -> dict:
+        def step(carry_key, step_constraint_trace):
+            carry, key = carry_key
+            step, constraint, trace = step_constraint_trace
+            key, k1 = KeySplit.bind(key, a="scan_update_step")
+            v = self.inner_impl.update_p(k1, (carry, step), address, constraint, trace)
+            return (v["retval"][0], key), v
+
+        stripped_trace = to_subtraces(previous_trace)
+        ans = jax.lax.scan(
+            step, (arg_tuple[0], key), (arg_tuple[1], constraint, stripped_trace)
+        )
         # Fix the return values to report the things an ordinary use of
         # scan would produce.
         ans[1]["retval"] = (ans[0][0], ans[1]["retval"][0])
