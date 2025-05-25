@@ -1,6 +1,8 @@
 import pytest
 import jax.random
 import jax.numpy as jnp
+from jaxtyping import Array
+
 from . import *
 
 
@@ -179,3 +181,190 @@ def test_simple_normal_update():
     updated_score = to_score(updated)
     assert updated_score == original_score + w
     assert updated_score == pytest.approx(test_score)
+
+
+def test_simple_linked_normal_update():
+    @Gen
+    def simple_linked_normal():
+        y1 = Normal(0.0, 1.0) @ "y1"
+        y2 = Normal(y1, 1.0) @ "y2"
+        y3 = Normal(y1 + y2, 1.0) @ "y3"
+        return y1 + y2 + y3
+
+    key = jax.random.key(314159)
+    key, sub_key = jax.random.split(key)
+    tr = jax.jit(simple_linked_normal().simulate)(sub_key)
+    jitted = jax.jit(simple_linked_normal().update)
+
+    new = {"y1": 2.0}
+    original_score = to_score(tr)
+    key, sub_key = jax.random.split(key)
+    updated = jitted(sub_key, new, tr)
+    w = to_weight(updated)
+    updated_choice = to_constraint(updated)
+    updated_score = to_score(updated)
+    y1 = updated_choice["y1"]
+    y2 = updated_choice["y2"]
+    y3 = updated_choice["y3"]
+    score1, _ = Normal(0.0, 1.0).assess(y1)
+    score2, _ = Normal(y1, 1.0).assess(y2)
+    score3, _ = Normal(y1 + y2, 1.0).assess(y3)
+    test_score = score1 + score2 + score3
+    # TODO restore
+    # assert original_choice["y1"] == discard["y1"]
+    assert updated_score == pytest.approx(original_score + w)
+    assert updated_score == pytest.approx(test_score)
+
+
+def test_simple_hierarchical_normal():
+    @Gen
+    def _inner(x):
+        y1 = Normal(x, 1.0) @ "y1"
+        return y1
+
+    @Gen
+    def simple_hierarchical_normal():
+        y1 = Normal(0.0, 1.0) @ "y1"
+        y2 = _inner(y1) @ "y2"
+        y3 = _inner(y1 + y2) @ "y3"
+        return y1 + y2 + y3
+
+    key = jax.random.key(314159)
+    key, sub_key = jax.random.split(key)
+    tr = jax.jit(simple_hierarchical_normal().simulate)(sub_key)
+    jitted = jax.jit(simple_hierarchical_normal().update)
+
+    new = {"y1": 2.0}
+    original_choice = to_constraint(tr)
+    original_score = to_score(tr)
+    key, sub_key = jax.random.split(key)
+
+    updated = jitted(sub_key, new, tr)
+    w = to_weight(updated)
+
+    updated_choice = to_constraint(updated)
+    y1 = updated_choice["y1"]
+    y2 = updated_choice["y2"]["y1"]
+    y3 = updated_choice["y3"]["y1"]
+    assert y1 == new["y1"]
+    assert y2 == original_choice["y2"]["y1"]
+    assert y3 == original_choice["y3"]["y1"]
+    score1, _ = Normal(0.0, 1.0).assess(y1)
+    score2, _ = Normal(y1, 1.0).assess(y2)
+    score3, _ = Normal(y1 + y2, 1.0).assess(y3)
+    test_score = score1 + score2 + score3
+    # TODO : restore
+    # assert original_choice["y1"] == discard["y1"]
+    updated_score = to_score(updated)
+    assert updated_score == original_score + w
+    assert updated_score == pytest.approx(test_score)
+
+
+def update_weight_correctness_general_assertions(simple_linked_normal):
+    key = jax.random.key(314159)
+    key, sub_key = jax.random.split(key)
+    tr = jax.jit(simple_linked_normal.simulate)(sub_key)
+    jitted = jax.jit(simple_linked_normal.update)
+    choices = to_constraint(tr)
+
+    old_y1 = choices["y1"]
+    old_y2 = choices["y2"]
+    old_y3 = choices["y3"]
+    new_y1 = 2.0
+    new = {"y1": new_y1}
+    key, sub_key = jax.random.split(key)
+    updated = jitted(sub_key, new, tr)
+    w = to_weight(updated)
+    # (_, w_edit, _, _) = tr.edit(sub_key, Update(new))
+    # assert w_edit == w
+
+    # TestStaticGenFn weight correctness.
+    updated_sample = to_constraint(updated)
+    assert updated_sample["y1"] == new_y1
+
+    δ_y3 = Normal(new_y1 + old_y2, 1.0).logpdf(old_y3) - Normal(
+        old_y1 + old_y2, 1.0
+    ).logpdf(old_y3)
+    δ_y2 = Normal(new_y1, 1.0).logpdf(old_y2) - Normal(old_y1, 1.0).logpdf(old_y2)
+    δ_y1 = Normal(0.0, 1.0).logpdf(new_y1) - Normal(0.0, 1.0).logpdf(old_y1)
+    assert w == pytest.approx((δ_y3 + δ_y2 + δ_y1))
+
+    # TestStaticGenFn composition of update calls.
+    new_y3 = 2.0
+    new = {"y3": new_y3}
+    key, sub_key = jax.random.split(key)
+    # TODO: our argument order disagrees with GenJAX which is unfortunate
+    updated = jitted(sub_key, new, updated)
+    w = to_weight(updated)
+    assert updated["subtraces"]["y3"]["retval"] == 2.0
+    correct_w = Normal(new_y1 + old_y2, 1.0).logpdf(new_y3) - Normal(
+        new_y1 + old_y2, 1.0
+    ).logpdf(old_y3)
+    assert w == pytest.approx(correct_w, 0.0001)
+
+
+def test_update_weight_correctness():
+    @Gen
+    def simple_linked_normal():
+        y1 = Normal(0.0, 1.0) @ "y1"
+        y2 = Normal(y1, 1.0) @ "y2"
+        y3 = Normal(y1 + y2, 1.0) @ "y3"
+        return y1 + y2 + y3
+
+    # easy case
+    update_weight_correctness_general_assertions(simple_linked_normal())
+
+    @Gen
+    def curried_linked_normal(v1, v2, v3):
+        y1 = Normal(0.0, v1) @ "y1"
+        y2 = Normal(y1, v2) @ "y2"
+        y3 = Normal(y1 + y2, v3) @ "y3"
+        return y1 + y2 + y3
+
+    # curry
+    update_weight_correctness_general_assertions(
+        curried_linked_normal.partial(1.0, 1.0, 1.0)()
+    )
+
+    # double-curry
+    update_weight_correctness_general_assertions(
+        curried_linked_normal.partial(1.0).partial(1.0, 1.0)()
+    )
+
+    @pytree
+    class Model:
+        v1: Array
+        v2: Array
+
+        @Gen
+        def run(self, v3):
+            y1 = Normal(0.0, self.v1) @ "y1"
+            y2 = Normal(y1, self.v2) @ "y2"
+            y3 = Normal(y1 + y2, v3) @ "y3"
+            return y1 + y2 + y3
+
+    # model method
+    m = Model(jnp.array(1.0), jnp.array(1.0))
+    # TODO: this works if we write m.run(m, 1.0), but we want
+    # the method to operate generatively and so m.run(1.0) is
+    # the correct thing to write.
+    # update_weight_correctness_general_assertions(m.run(1.0))
+
+    @Gen
+    def m_linked(m: Model, v2, v3):
+        y1 = Normal(0.0, m.v1) @ "y1"
+        y2 = Normal(y1, v2) @ "y2"
+        y3 = Normal(y1 + y2, v3) @ "y3"
+        return y1 + y2 + y3
+
+    update_weight_correctness_general_assertions(m_linked.partial(m)(1.0, 1.0))
+
+    @Gen
+    def m_created_internally(scale: Array):
+        m_internal = Model(scale, scale)
+        return m_internal.run.inline(scale)
+
+    # TODO: minigenjax does not currently support `inline`
+    # update_weight_correctness_general_assertions(
+    #     m_created_internally(jnp.array(1.0))
+    # )

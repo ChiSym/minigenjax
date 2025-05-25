@@ -647,18 +647,14 @@ def test_map():
 
 
 def test_simple_repeat():
-    @Gen
-    def coefficient():
-        return Normal(0.0, 1.0) @ "c"
-
-    def Poly(coefficient_gf, n):
+    def make_poly_gf(coefficient_gf, n):
         @Gen
         def poly():
             return coefficient_gf.repeat(n)() @ "cs"
 
         return poly
 
-    poly4 = Poly(coefficient, 4)
+    poly4 = make_poly_gf(coefficient, 4)
     tr = poly4().simulate(key0)
     assert jnp.allclose(
         tr["retval"], jnp.array([0.30984825, -1.3642794, 2.2861156, 0.6714109])

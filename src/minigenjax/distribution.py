@@ -73,7 +73,6 @@ class Distribution(GenPrimitive):
         constraint: Constraint | None,
         previous_trace: dict,
     ):
-        print(f"update_p {arg_tuple} {address} {constraint} {previous_trace}")
         if constraint is not None:
             new_score = self.bind(constraint, *arg_tuple[1:], op="Score")
             ans = {
@@ -82,7 +81,12 @@ class Distribution(GenPrimitive):
                 "score": new_score,
             }
         else:
-            ans = previous_trace
+            new_score = self.bind(previous_trace["retval"], *arg_tuple[1:], op="Score")
+            ans = {
+                "score": new_score,
+                "w": new_score - previous_trace["score"],
+                "retval": previous_trace["retval"],
+            }
         return ans
 
     def assess_p(
@@ -110,6 +114,9 @@ class Distribution(GenPrimitive):
 
             def logpdf(self, v):
                 return self.to_tfp().log_prob(v)
+
+            def assess(self, v):
+                return self.logpdf(v), v
 
             # TODO: from here, you can't `map` a distribution.
 

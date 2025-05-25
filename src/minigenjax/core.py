@@ -223,6 +223,18 @@ class PartialGF(GFImpl):
             key, self.partial_args + arg_tuple, address, constraint
         )
 
+    def update_p(
+        self,
+        key: PRNGKeyArray,
+        arg_tuple: tuple,
+        address: Address,
+        constraint: Constraint,
+        previous_trace: dict,
+    ):
+        return self.inner_impl.update_p(
+            key, self.partial_args + arg_tuple, address, constraint, previous_trace
+        )
+
     def abstract(self, *args, **kwargs):
         return self.abstract_value
 
