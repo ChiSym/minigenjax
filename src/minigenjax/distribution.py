@@ -1,7 +1,7 @@
 import functools
 import jax
 import jax.core
-from .types import PHANTOM_KEY, Constraint, Address
+from .types import PHANTOM_KEY, Address
 from .primitive import GenPrimitive
 from jax.interpreters import mlir
 from jaxtyping import Array, PRNGKeyArray, Float, DTypeLike
@@ -54,7 +54,7 @@ class Distribution(GenPrimitive):
         key: PRNGKeyArray,
         arg_tuple: tuple,
         address: Address,
-        constraint: Constraint | None,
+        constraint: dict | None,
     ):
         if constraint is not None:
             score = self.bind(constraint, *arg_tuple[1:], op="Score")
@@ -70,7 +70,7 @@ class Distribution(GenPrimitive):
         key: PRNGKeyArray,
         arg_tuple: tuple,
         address: Address,
-        constraint: Constraint | None,
+        constraint: dict | None,
         previous_trace: dict,
     ):
         if constraint is not None:
@@ -92,7 +92,7 @@ class Distribution(GenPrimitive):
     def assess_p(
         self,
         arg_tuple: tuple,
-        constraint: Constraint | Float,
+        constraint: dict | Float,
         address: tuple[str, ...],
     ) -> tuple[Array, Array]:
         assert not isinstance(constraint, dict)

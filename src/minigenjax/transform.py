@@ -1,5 +1,5 @@
 from jaxtyping import PRNGKeyArray, Float
-from .types import Address, Constraint
+from .types import Address
 from .key import KeySplit
 from .primitive import GenPrimitive
 import jax
@@ -13,7 +13,7 @@ class MissingConstraint(Exception):
 
 
 class Transformation[R]:
-    def __init__(self, key: PRNGKeyArray, address: Address, constraint: Constraint):
+    def __init__(self, key: PRNGKeyArray, address: Address, constraint: dict):
         self.key = key
         self.address = address
         self.constraint = constraint
@@ -99,7 +99,7 @@ class Transformation[R]:
             return b.jaxpr.eqns[0].params.get("at")
         return None
 
-    def get_sub_constraint(self, a: str, required: bool = False) -> Constraint | Float:
+    def get_sub_constraint(self, a: str, required: bool = False) -> dict | Float:
         if self.constraint is None:
             c = None
         else:
@@ -113,7 +113,7 @@ class Transformation[R]:
 
 
 class TracingTransform(Transformation[dict]):
-    def __init__(self, key: PRNGKeyArray, address: Address, constraint: Constraint):
+    def __init__(self, key: PRNGKeyArray, address: Address, constraint: dict):
         super().__init__(key, address, constraint)
         self.trace = {}
         self.w = jnp.array(0.0)

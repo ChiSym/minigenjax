@@ -11,92 +11,9 @@ from .simulate import Simulate
 from .update import Update
 from .assess import Assess
 from .trace import to_constraint, to_score, to_weight, to_subtraces
-from minigenjax.types import Address, Constraint
+from minigenjax.types import Address
 import jax.core
 from jaxtyping import Array, PRNGKeyArray, Float, PyTreeDef
-
-
-# %%
-
-
-# %%
-class Gen[R]:
-    def __init__(self, f: Callable[..., R] | None = None):
-        self.f = f
-
-    def get_name(self) -> str:
-        return self.f.__name__ if self.f else "?"
-
-    def __call__(self, *args) -> "GFI":
-        assert self.f is not None
-        # TODO: fix this so that the base class isn't holding the reference to f.
-        # Maybe there should be a constructor function and a class, and we're
-        # working too hard to overload this
-        return GFA(self.f, args)
-
-    def repeat(self, n):
-        this = self
-
-        class ToRepeat(Gen):
-            def __init__(self, n):
-                super().__init__()
-                self.n = n
-
-            def __call__(self, *args):
-                return RepeatA(n, args, this)
-
-        return ToRepeat(n)
-
-    def vmap(self, in_axes: InAxesT = 0):
-        this = self
-
-        class ToVmap(Gen):
-            def __init__(self, in_axes):
-                super().__init__()
-                self.in_axes = in_axes
-
-            def __call__(self, *args):
-                return VmapA(self.in_axes, args, this)
-
-        return ToVmap(in_axes)
-
-    def map(self, g):
-        this = self
-
-        class ToMap(Gen):
-            def __init__(self, g):
-                super().__init__()
-                self.g = g
-
-            def __call__(self, *args):
-                return MapA(self.g, args, this)
-
-        return ToMap(g)
-
-    def scan(self):
-        this = self
-
-        class ToScan(Gen):
-            def __init__(self):
-                super().__init__()
-
-            def __call__(self, *args):
-                return ScanA(args, this)
-
-        return ToScan()
-
-    def partial(self, *args):
-        this = self
-
-        class ToPartial(Gen):
-            def __init__(self, partial_args):
-                super().__init__()
-                self.partial_args = partial_args
-
-            def __call__(self, *args):
-                return PartialA(self.partial_args, args, this)
-
-        return ToPartial(args)
 
 
 class GFI[R]:
@@ -106,9 +23,7 @@ class GFI[R]:
     def simulate(self, key: PRNGKeyArray) -> dict:
         return self.get_impl().simulate_p(key, self.get_args(), (), {})
 
-    def update(
-        self, key: PRNGKeyArray, constraint: Constraint, previous_trace: dict
-    ) -> dict:
+    def update(self, key: PRNGKeyArray, constraint: dict, previous_trace: dict) -> dict:
         return self.get_impl().update_p(
             key, self.get_args(), (), constraint, previous_trace
         )
@@ -116,11 +31,11 @@ class GFI[R]:
     def assess(self, constraint) -> tuple[Array, Array]:
         return self.get_impl().assess_p(self.get_args(), constraint, ())
 
-    def propose(self, key: PRNGKeyArray) -> tuple[Constraint, Float, R]:
+    def propose(self, key: PRNGKeyArray) -> tuple[dict, Float, R]:
         tr = self.simulate(key)
         return to_constraint(tr), to_score(tr), tr["retval"]
 
-    def importance(self, key: PRNGKeyArray, constraint: Constraint):
+    def importance(self, key: PRNGKeyArray, constraint: dict):
         tr = self.get_impl().simulate_p(key, self.get_args(), (), constraint)
         return tr, to_weight(tr)
 
@@ -140,8 +55,36 @@ class GFI[R]:
     def get_structure(self) -> PyTreeDef:
         raise NotImplementedError(f"get_structure: {self}")
 
+    # TODO ??
     def abstract(self, *args, **kwargs):
         return self.get_impl().abstract(*args, **kwargs)
+
+
+class Gen[R]:
+    def __init__(self, inner: Callable[..., GFI[R]]):
+        self.inner = inner
+
+    def __call__(self, *args) -> "GFI":
+        return self.inner(*args)
+
+    def repeat(self, n):
+        return Gen(lambda *args: RepeatA(n, args, self.inner))
+
+    def vmap(self, in_axes: InAxesT = 0):
+        return Gen(lambda *args: VmapA(in_axes, args, self.inner))
+
+    def map(self, g):
+        return Gen(lambda *args: MapA(g, args, self.inner))
+
+    def scan(self):
+        return Gen(lambda *args: ScanA(args, self.inner))
+
+    def partial(self, *partial_args):
+        return Gen(lambda *args: PartialA(partial_args, args, self.inner))
+
+
+def gen[R](f: Callable[..., R]) -> Gen[R]:
+    return Gen[R](lambda *args: GFA(f, args))
 
 
 class GFA[R](GFI[R]):
@@ -192,13 +135,11 @@ class GFImpl[R](GenPrimitive):
         key: PRNGKeyArray,
         arg_tuple: tuple,
         address: Address,
-        constraint: Constraint,
+        constraint: dict,
     ) -> dict:
         raise NotImplementedError(f"simulate_p: {self}")
 
-    def assess_p(
-        self, arg_tuple: tuple, constraint: Constraint, address
-    ) -> tuple[Float, R]:
+    def assess_p(self, arg_tuple: tuple, constraint: dict, address) -> tuple[Float, R]:
         raise NotImplementedError(f"assess_p: {self}")
 
 
@@ -217,7 +158,7 @@ class PartialGF(GFImpl):
         key: PRNGKeyArray,
         arg_tuple: tuple,
         address: Address,
-        constraint: Constraint,
+        constraint: dict,
     ) -> dict:
         return self.inner_impl.simulate_p(
             key, self.partial_args + arg_tuple, address, constraint
@@ -228,7 +169,7 @@ class PartialGF(GFImpl):
         key: PRNGKeyArray,
         arg_tuple: tuple,
         address: Address,
-        constraint: Constraint,
+        constraint: dict,
         previous_trace: dict,
     ):
         return self.inner_impl.update_p(
@@ -260,8 +201,8 @@ class ScanA(GFI):
 
 
 class RepeatA[R](GFI):
-    def __init__(self, n, arg_tuple, next: Gen):
-        self.repeated = next(*arg_tuple)
+    def __init__(self, n, arg_tuple, inner: Callable[..., GFI[R]]):
+        self.repeated = inner(*arg_tuple)
         super().__init__(f"Repeat[{n}, {self.repeated.name}]")
         self.n = n
         self.arg_tuple = arg_tuple
@@ -361,7 +302,7 @@ class GFB[R](GFImpl):
         key: PRNGKeyArray,
         arg_tuple: tuple,
         address: Address,
-        constraint: Constraint,
+        constraint: dict,
     ) -> dict:
         return Simulate(key, address, constraint).run_f(self.f, arg_tuple)
 
@@ -370,14 +311,12 @@ class GFB[R](GFImpl):
         key: PRNGKeyArray,
         arg_tuple: tuple,
         address: Address,
-        constraint: Constraint,
+        constraint: dict,
         previous_trace: dict,
     ):
         return Update(key, address, constraint, previous_trace).run_f(self.f, arg_tuple)
 
-    def assess_p(
-        self, arg_tuple: tuple, constraint: Constraint, address
-    ) -> tuple[Float, R]:
+    def assess_p(self, arg_tuple: tuple, constraint: dict, address) -> tuple[Float, R]:
         a = Assess[R](address, constraint)
         retval = a.run_f(self.f, arg_tuple)
         return a.score, retval
@@ -397,7 +336,7 @@ class RepeatGF[R](GFImpl):
         key: PRNGKeyArray,
         arg_tuple: tuple,
         address: Address,
-        constraint: Constraint,
+        constraint: dict,
     ) -> dict:
         return jax.vmap(
             lambda key, constraint: self.repeated.get_impl().simulate_p(
@@ -405,9 +344,7 @@ class RepeatGF[R](GFImpl):
             )
         )(jax.random.split(key, self.n), constraint)
 
-    def assess_p(
-        self, arg_tuple: tuple, constraint: Constraint, address
-    ) -> tuple[Float, R]:
+    def assess_p(self, arg_tuple: tuple, constraint: dict, address) -> tuple[Float, R]:
         score, retval = jax.vmap(
             lambda constraint: self.repeated.get_impl().assess_p(
                 arg_tuple, constraint, address
@@ -433,7 +370,7 @@ def Cond(tf, ff):
                 )
 
             def simulate(self, key: PRNGKeyArray):
-                return Gen(lambda: self @ "__cond")().simulate(key)
+                return gen(lambda: self @ "__cond")().simulate(key)
 
         return Binder()
 
@@ -456,7 +393,7 @@ class ScanGF[R](GFImpl):
         key: Array,
         arg_tuple: tuple,
         address: tuple[str, ...],
-        constraint: Constraint,
+        constraint: dict,
     ) -> dict:
         def step(carry_key, step_constraint):
             carry, key = carry_key
@@ -476,7 +413,7 @@ class ScanGF[R](GFImpl):
         key: Array,
         arg_tuple: tuple,
         address: tuple[str, ...],
-        constraint: Constraint,
+        constraint: dict,
         previous_trace: dict,
     ) -> dict:
         def step(carry_key, step_constraint_trace):
@@ -518,7 +455,7 @@ class VmapGF[R](GFImpl):
         key: PRNGKeyArray,
         arg_tuple: tuple,
         address: Address,
-        constraint: Constraint,
+        constraint: dict,
     ) -> dict:
         n = arg_tuple[self.p_index].shape[self.an_axis]
         return jax.vmap(
@@ -529,7 +466,7 @@ class VmapGF[R](GFImpl):
         )(jax.random.split(key, n), constraint, arg_tuple)
 
     def assess_p(
-        self, arg_tuple: tuple, constraint: Constraint, address: tuple[str, ...]
+        self, arg_tuple: tuple, constraint: dict, address: tuple[str, ...]
     ) -> Float:
         def vmap_inner(constraint, params):
             return self.inner_impl.assess_p(params, constraint, address)
@@ -556,7 +493,7 @@ class MapGF[R, S](GFImpl):
         key: PRNGKeyArray,
         arg_tuple: tuple,
         address: Address,
-        constraint: Constraint,
+        constraint: dict,
     ) -> dict:
         out = self.inner_impl.simulate_p(key, arg_tuple, address, constraint)
         out["retval"] = self.g(out["retval"])

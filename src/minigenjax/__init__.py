@@ -1,7 +1,6 @@
 from .core import (
-    Gen,
+    gen,
     Cond,
-    Constraint,
 )
 
 from .transform import MissingConstraint
@@ -25,7 +24,7 @@ from .trace import (
 from .pytree import pytree as pytree
 
 __all__ = [
-    "Gen",
+    "gen",
     "Normal",
     "Uniform",
     "Cond",
@@ -33,7 +32,6 @@ __all__ = [
     "to_constraint",
     "to_score",
     "to_weight",
-    "Constraint",
     "Categorical",
     "Bernoulli",
     "MissingConstraint",

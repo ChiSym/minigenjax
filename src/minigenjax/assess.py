@@ -1,5 +1,5 @@
 from .transform import Transformation
-from .types import Address, Constraint, PHANTOM_KEY
+from .types import Address, PHANTOM_KEY
 from .primitive import GenPrimitive
 import jax.extend as jx
 import jax.numpy as jnp
@@ -7,7 +7,7 @@ import jax
 
 
 class Assess[R](Transformation[R]):
-    def __init__(self, address: Address, constraint: Constraint):
+    def __init__(self, address: Address, constraint: dict):
         super().__init__(PHANTOM_KEY, address, constraint)
         self.score = jnp.array(0.0)
 

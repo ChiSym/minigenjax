@@ -70,7 +70,7 @@ def test_localization():
     sensor_noise = 0.1
     key = jax.random.key(0)
 
-    @Gen
+    @gen
     def sensor_model_one(pose, angle, sensor_noise):
         return (
             Normal(
@@ -80,7 +80,7 @@ def test_localization():
             @ "distance"
         )
 
-    @Gen
+    @gen
     def uniform_pose(mins, maxes):
         p_array = Uniform(mins, maxes) @ "p_array"
         return Pose(p_array[0:2], p_array[2])
@@ -132,7 +132,7 @@ def test_localization():
             lambda angle: sensor_distance(pose.rotate(angle), walls, sensor_range)
         )(sensor_angles)
 
-    @Gen
+    @gen
     def joint_model():
         pose = whole_map_prior @ "pose"
         _ = sensor_model(pose, sensor_angles, sensor_noise) @ "sensor"
@@ -195,7 +195,7 @@ def test_localization():
         ),
     )
 
-    @Gen
+    @gen
     def step_model(motion_settings, start, control):
         p = (
             MvNormalDiag(
@@ -221,9 +221,9 @@ def test_localization():
 
     motion_settings = {"p_noise": 0.05, "hd_noise": 0.001}
 
-    @Gen
+    @gen
     def path_model():
-        @Gen
+        @gen
         def step(motion_settings, start, control):
             s = step_model(motion_settings, start, control) @ "step"
             return s, s
@@ -254,7 +254,7 @@ def test_localization():
         jnp.array([0.29812962, -0.10176747, -0.00270242]),
     )
 
-    @Gen
+    @gen
     def full_model_kernel(motion_settings, sensor_noise, state, control):
         pose = step_model(motion_settings, state, control) @ "pose"
         _ = sensor_model(pose, sensor_angles, sensor_noise) @ "sensor"
@@ -294,7 +294,7 @@ def test_localization():
     assert tr["retval"][1].p.shape == (3, 2)
 
     def full_model_factory(motion_settings, sensor_noise):
-        @Gen
+        @gen
         def full_model():
             return (
                 full_model_kernel.partial(motion_settings, sensor_noise)
@@ -315,7 +315,7 @@ def test_localization():
     observations = to_constraint(tr)["steps"]["sensor"]["distance"]
     assert observations.shape == (len(robot_inputs["controls"]), len(sensor_angles))
 
-    constraint: Constraint = {"steps": {"sensor": {"distance": observations}}}
+    constraint = {"steps": {"sensor": {"distance": observations}}}
     key, sub_key = jax.random.split(key)
     tr, w = full_model.importance(sub_key, constraint)
     # print(tr, w)

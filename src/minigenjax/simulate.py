@@ -3,7 +3,7 @@ import jax
 import jax.extend as jx
 from .primitive import GenPrimitive
 from .transform import TracingTransform
-from .types import Address, Constraint
+from .types import Address
 
 
 class Simulate(TracingTransform):
@@ -11,7 +11,7 @@ class Simulate(TracingTransform):
         self,
         key: PRNGKeyArray,
         address: Address,
-        constraint: Constraint,
+        constraint: dict,
     ):
         super().__init__(key, address, constraint)
 

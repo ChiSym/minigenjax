@@ -4,7 +4,7 @@ import minigenjax
 from minigenjax.test_minigenjax import model1, model2, model3, cond_model
 
 
-@minigenjax.Gen
+@minigenjax.gen
 def model2p(x, y):
     return minigenjax.Normal(x, y) @ "n"
 

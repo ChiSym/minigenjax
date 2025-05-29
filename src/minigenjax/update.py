@@ -1,6 +1,6 @@
 from .primitive import GenPrimitive
 from .transform import TracingTransform
-from .types import Address, Constraint
+from .types import Address
 from jaxtyping import PRNGKeyArray
 import jax.extend as jx
 import jax
@@ -11,7 +11,7 @@ class Update(TracingTransform):
         self,
         key: PRNGKeyArray,
         address: Address,
-        constraint: Constraint,
+        constraint: dict,
         previous_trace: dict,
     ):
         super().__init__(key, address, constraint)

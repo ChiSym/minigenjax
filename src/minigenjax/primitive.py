@@ -1,5 +1,5 @@
 from jax.interpreters import batching
-from minigenjax.types import Address, Constraint, InAxesT
+from minigenjax.types import Address, InAxesT
 from jaxtyping import Array, PRNGKeyArray, Float
 from typing import Any
 import jax
@@ -36,7 +36,7 @@ class GenPrimitive(jx.core.Primitive):
         key: PRNGKeyArray,
         arg_tuple: tuple,
         address: Address,
-        constraint: Constraint,
+        constraint: dict,
     ) -> dict:
         raise NotImplementedError(f"simulate_p: {self}")
 
@@ -45,13 +45,13 @@ class GenPrimitive(jx.core.Primitive):
         key: PRNGKeyArray,
         arg_tuple: tuple,
         address: Address,
-        constraint: Constraint,
+        constraint: dict,
         previous_trace: dict,
     ) -> dict:
         raise NotImplementedError(f"update_p: {self}")
 
     def assess_p(
-        self, arg_tuple: tuple, constraint: Constraint | Float, address: tuple[str, ...]
+        self, arg_tuple: tuple, constraint: dict | Float, address: tuple[str, ...]
     ) -> tuple[Array, Any]:
         raise NotImplementedError(f"assess_p: {self}")
 
