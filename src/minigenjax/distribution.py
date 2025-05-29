@@ -103,17 +103,16 @@ class Distribution(GenPrimitive):
         this = self
 
         class Binder:
+            tfd = self.tfd_ctor(*args)
+
             def __matmul__(self, address: str):
                 return this.bind(PHANTOM_KEY, *args, op="Sample", at=address)
 
-            def to_tfp(self):
-                return this.tfd_ctor(*args)
-
             def sample(self, key: PRNGKeyArray):
-                return self.to_tfp().sample(seed=key)
+                return self.tfd.sample(seed=key)
 
             def logpdf(self, v):
-                return self.to_tfp().log_prob(v)
+                return self.tfd.log_prob(v)
 
             def assess(self, v):
                 return self.logpdf(v), v
@@ -155,7 +154,7 @@ CategoricalP = Distribution(
 Mixture = Distribution(
     "Mixture",
     lambda cat, components: tfp.distributions.Mixture(
-        cat=cat.to_tfp(), components=list(map(lambda c: c.to_tfp(), components))
+        cat=cat.tfd, components=list(map(lambda c: c.tfd, components))
     ),
 )
 
