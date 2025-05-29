@@ -64,11 +64,11 @@ class Gen[R]:
     def __init__(self, inner: Callable[..., GFI[R]]):
         self.inner = inner
 
-    def __call__(self, *args) -> "GFI":
+    def __call__(self, *args) -> GFI[R]:
         return self.inner(*args)
 
     def repeat(self, n):
-        return Gen(lambda *args: RepeatA(n, args, self.inner))
+        return Gen(lambda *args: RepeatA(n, self.inner, args))
 
     def vmap(self, in_axes: InAxesT = 0):
         return Gen(lambda *args: VmapA(in_axes, args, self.inner))
@@ -77,10 +77,10 @@ class Gen[R]:
         return Gen(lambda *args: MapA(g, args, self.inner))
 
     def scan(self):
-        return Gen(lambda *args: ScanA(args, self.inner))
+        return Gen(lambda *args: ScanA(self.inner, args))
 
     def partial(self, *partial_args):
-        return Gen(lambda *args: PartialA(partial_args, args, self.inner))
+        return Gen(lambda *args: PartialA(partial_args, self.inner, args))
 
 
 def gen[R](f: Callable[..., R]) -> Gen[R]:
@@ -108,16 +108,16 @@ class GFA[R](GFI[R]):
 
 
 class PartialA(GFI):
-    def __init__(self, partial_args, args, next):
+    def __init__(self, partial_args, inner: Callable[..., GFI], args):
         # TODO: make the initialization sane by extracting a base class
         # so that GFA is not the root
         self.partial_args = partial_args
         self.args = args
-        self.gfa = next(*self.partial_args, *self.args)
+        self.gfa = inner(*self.partial_args, *self.args)
         super().__init__(f"Partial[{self.gfa.name}]")
 
     def get_impl(self):
-        return PartialGF(self.partial_args, self.gfa)
+        return PartialGF(self.gfa, self.partial_args)
 
     def get_args(self):
         return self.args
@@ -144,7 +144,7 @@ class GFImpl[R](GenPrimitive):
 
 
 class PartialGF(GFImpl):
-    def __init__(self, partial_args, inner: GFI):
+    def __init__(self, inner: GFI, partial_args):
         super().__init__(f"Partial[{inner.name}]")
         self.inner_impl = inner.get_impl()
         self.abstract_value = inner.abstract(
@@ -181,12 +181,12 @@ class PartialGF(GFImpl):
 
 
 class ScanA(GFI):
-    def __init__(self, args, nxt):
+    def __init__(self, inner: Callable[..., GFI], args):
         assert len(args) == 2
         self.args = args
         self.multiple_results = True
         # fixed_args = (arg_tuple[0], jax.tree.map(lambda v: v[0], arg_tuple[1]))
-        self.gfa = nxt(args[0], jax.tree.map(lambda v: v[0], args[1]))
+        self.gfa = inner(args[0], jax.tree.map(lambda v: v[0], args[1]))
         super().__init__(f"Scan[{self.gfa.name}]")
 
     def get_impl(self):
@@ -201,7 +201,7 @@ class ScanA(GFI):
 
 
 class RepeatA[R](GFI):
-    def __init__(self, n, arg_tuple, inner: Callable[..., GFI[R]]):
+    def __init__(self, n, inner: Callable[..., GFI[R]], arg_tuple):
         self.repeated = inner(*arg_tuple)
         super().__init__(f"Repeat[{n}, {self.repeated.name}]")
         self.n = n

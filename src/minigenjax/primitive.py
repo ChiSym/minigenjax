@@ -2,7 +2,6 @@ from jax.interpreters import batching
 from minigenjax.types import Address, InAxesT
 from jaxtyping import Array, PRNGKeyArray, Float
 from typing import Any
-import jax
 import jax.extend as jx
 
 
@@ -25,11 +24,7 @@ class GenPrimitive(jx.core.Primitive):
         batch_axes: InAxesT,
         **kwargs,
     ) -> tuple[Any, InAxesT]:
-        # TODO assert all axes equal
-        result = jax.vmap(lambda *args: self.impl(*args, **kwargs), in_axes=batch_axes)(
-            *vector_args
-        )
-        return result, batch_axes
+        raise NotImplementedError(f"batch: {self}")
 
     def simulate_p(
         self,
@@ -57,9 +52,3 @@ class GenPrimitive(jx.core.Primitive):
 
     def get_args(self) -> tuple:
         raise NotImplementedError(f"get_args: {self}")
-
-    def inflate(self, v: Any, n: int):
-        def inflate_one(v):
-            return v.update(shape=(n,) + v.shape)
-
-        return jax.tree.map(inflate_one, v)
