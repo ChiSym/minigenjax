@@ -185,19 +185,20 @@ class ScanA(GFI):
         assert len(args) == 2
         self.args = args
         self.multiple_results = True
-        # fixed_args = (arg_tuple[0], jax.tree.map(lambda v: v[0], arg_tuple[1]))
-        self.gfa = inner(args[0], jax.tree.map(lambda v: v[0], args[1]))
-        super().__init__(f"Scan[{self.gfa.name}]")
+        self.scanned = inner(args[0], jax.tree.map(lambda v: v[0], args[1]))
+        self.n = jax.tree.leaves(args[1])[0].shape[0]
+        print(f'structure: {self.scanned.get_structure()}')
+        super().__init__(f"Scan[{self.scanned.name}]")
 
     def get_impl(self):
-        return ScanGF(self.gfa)
+        return ScanGF(self)
 
     def get_args(self):
         return self.args
 
     def get_structure(self):
         # return self.structure
-        return self.gfa.get_structure()
+        return self.scanned.get_structure()
 
 
 class RepeatA[R](GFI):
@@ -380,13 +381,13 @@ def Cond(tf, ff):
 class ScanGF[R](GFImpl):
     def __init__(self, inner: ScanA):
         super().__init__(f"ScanGF[{inner.name}]")
-        self.inner_impl = inner.get_impl()
-        # TODO: could we just compute abstract_value up front, forever?
-        self.abstract_value = inner.abstract(*jax.tree.flatten(inner.get_args())[0])
+        self.n = inner.n
+        self.scanned_impl = inner.scanned.get_impl()
         self.multiple_results = True
 
     def abstract(self, *args, **kwargs):
-        return self.abstract_value
+        ia = self.scanned_impl.abstract(*args, **kwargs)
+        return jax.tree.map(lambda a: a.update(shape=(self.n,) + a.shape), ia)
 
     def simulate_p(
         self,
@@ -399,7 +400,7 @@ class ScanGF[R](GFImpl):
             carry, key = carry_key
             step, constraint = step_constraint
             key, k1 = KeySplit.bind(key, a="scan_step")
-            v = self.inner_impl.simulate_p(k1, (carry, step), address, constraint)
+            v = self.scanned_impl.simulate_p(k1, (carry, step), address, constraint)
             return (v["retval"][0], key), v
 
         ans = jax.lax.scan(step, (arg_tuple[0], key), (arg_tuple[1], constraint))
@@ -420,7 +421,7 @@ class ScanGF[R](GFImpl):
             carry, key = carry_key
             step, constraint, trace = step_constraint_trace
             key, k1 = KeySplit.bind(key, a="scan_update_step")
-            v = self.inner_impl.update_p(k1, (carry, step), address, constraint, trace)
+            v = self.scanned_impl.update_p(k1, (carry, step), address, constraint, trace)
             return (v["retval"][0], key), v
 
         stripped_trace = to_subtraces(previous_trace)

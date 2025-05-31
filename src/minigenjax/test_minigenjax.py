@@ -437,7 +437,6 @@ class TestScan:
             jnp.array([2.903057, 3.514152, 3.5678985, 3.6626565, 3.4758694]),
         )
 
-    # @pytest.mark.skip(reason="after we fix the base case")
     def test_scan_update(self):
         model = TestScan.update.scan()(10.0, jnp.arange(0.1, 0.6, 0.1))
         tr = model.simulate(key0)
