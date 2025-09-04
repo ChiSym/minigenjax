@@ -1,18 +1,18 @@
 from .core import (
     gen,
-    Cond,
+    Cond as cond,
 )
 
 from .transform import MissingConstraint
 
 from .distribution import (
-    Flip,
-    Normal,
-    Uniform,
-    Categorical,
-    Bernoulli,
-    Mixture,
-    MvNormalDiag,
+    Flip as flip,
+    Normal as normal,
+    Uniform as uniform,
+    Categorical as categorical,
+    Bernoulli as bernoulli,
+    Mixture as mixture,
+    MvNormalDiag as mv_normal_diag,
 )
 
 from .trace import (
@@ -25,17 +25,17 @@ from .pytree import pytree as pytree
 
 __all__ = [
     "gen",
-    "Normal",
-    "Uniform",
-    "Cond",
-    "Flip",
+    "normal",
+    "uniform",
+    "cond",
+    "flip",
     "to_constraint",
     "to_score",
     "to_weight",
-    "Categorical",
-    "Bernoulli",
+    "categorical",
+    "bernoulli",
     "MissingConstraint",
-    "Mixture",
-    "MvNormalDiag",
+    "mixture",
+    "mv_normal_diag",
     "pytree",
 ]

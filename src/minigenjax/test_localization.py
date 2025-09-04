@@ -73,7 +73,7 @@ def test_localization():
     @gen
     def sensor_model_one(pose, angle, sensor_noise):
         return (
-            Normal(
+            normal(
                 sensor_distance(pose.rotate(angle), walls, sensor_range),
                 sensor_noise,
             )
@@ -82,7 +82,7 @@ def test_localization():
 
     @gen
     def uniform_pose(mins, maxes):
-        p_array = Uniform(mins, maxes) @ "p_array"
+        p_array = uniform(mins, maxes) @ "p_array"
         return Pose(p_array[0:2], p_array[2])
 
     whole_map_prior = uniform_pose(
@@ -158,7 +158,7 @@ def test_localization():
 
     scores = jax.vmap(trial, in_axes=(0, None))(poses, target_readings)
     key, sub_key = jax.random.split(key)
-    winners = jax.vmap(Categorical(logits=scores).sample)(jax.random.split(sub_key, 10))
+    winners = jax.vmap(categorical(logits=scores).sample)(jax.random.split(sub_key, 10))
     winning_poses = jax.tree.map(lambda v: v[winners], poses)
     assert jnp.allclose(
         winning_poses.p,
@@ -198,13 +198,13 @@ def test_localization():
     @gen
     def step_model(motion_settings, start, control):
         p = (
-            MvNormalDiag(
+            mv_normal_diag(
                 start.p + control.ds * start.dp(),
                 motion_settings["p_noise"] * jnp.ones(2),
             )
             @ "p"
         )
-        hd = Normal(start.hd + control.dhd, motion_settings["hd_noise"]) @ "hd"
+        hd = normal(start.hd + control.dhd, motion_settings["hd_noise"]) @ "hd"
         return Pose(p, hd)
 
     @pytree

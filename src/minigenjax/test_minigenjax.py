@@ -10,18 +10,18 @@ from .trace import to_weight
 
 @gen
 def model1(b):
-    y = Normal(b, 0.1) @ "x"
+    y = normal(b, 0.1) @ "x"
     return y
 
 
 @gen
 def void_model(b):
-    _ = Normal(b, 9.1) @ "b"
+    _ = normal(b, 9.1) @ "b"
 
 
 @gen
 def model2(b):
-    return Uniform(b, b + 2.0) @ "x"
+    return uniform(b, b + 2.0) @ "x"
 
 
 @gen
@@ -33,32 +33,32 @@ def model3(x):
 
 @gen
 def cond_model(b):
-    flip = Flip(0.5) @ "flip"
-    y = Cond(model1(b), model2(b / 2.0))(flip) @ "s"
+    f = flip(0.5) @ "flip"
+    y = cond(model1(b), model2(b / 2.0))(f) @ "s"
     return y
 
 
 @gen
 def inlier_model(y, sigma_inlier):
-    return Normal(y, sigma_inlier) @ "value"
+    return normal(y, sigma_inlier) @ "value"
 
 
 @gen
 def outlier_model(y):
-    return Uniform(y - 1.0, y + 1.0) @ "value"
+    return uniform(y - 1.0, y + 1.0) @ "value"
 
 
 @gen
 def curve_model(f, x, p_outlier, sigma_inlier):
-    outlier = Flip(p_outlier) @ "outlier"
+    outlier = flip(p_outlier) @ "outlier"
     y = f(x)
-    fork = Cond(outlier_model(y), inlier_model(y, sigma_inlier))
+    fork = cond(outlier_model(y), inlier_model(y, sigma_inlier))
     return fork(outlier) @ "y"
 
 
 @gen
 def coefficient():
-    return Normal(0.0, 1.0) @ "c"
+    return normal(0.0, 1.0) @ "c"
 
 
 @pytree
@@ -85,7 +85,7 @@ def test_pytree():
 
     @gen
     def noisy_eval(f, x):
-        return f(x) + Normal(0.0, 0.01) @ "noise"
+        return f(x) + normal(0.0, 0.01) @ "noise"
 
     tr = jax.jit(noisy_eval(p, 0.0).simulate)(jax.random.key(1))
     assert tr["retval"] == 1.1069956
@@ -170,8 +170,8 @@ def test_logit_vs_probs():
 
     @gen
     def model():
-        g = Bernoulli(logits=-0.3) @ "l"
-        p = Bernoulli(probs=0.3) @ "p"
+        g = bernoulli(logits=-0.3) @ "l"
+        p = bernoulli(probs=0.3) @ "p"
         return g, p
 
     tr = model().simulate(key0)
@@ -218,7 +218,7 @@ def test_distribution_as_sampler():
         return lambda f: jax.vmap(f)(jax.random.split(key0, n))
 
     assert jnp.allclose(
-        vmap(10)(Normal(0.0, 0.01).sample),
+        vmap(10)(normal(0.0, 0.01).sample),
         jnp.array(
             [
                 -0.00449334,
@@ -235,7 +235,7 @@ def test_distribution_as_sampler():
         ),
     )
     assert jnp.allclose(
-        vmap(10)(Uniform(5.0, 6.0).sample),
+        vmap(10)(uniform(5.0, 6.0).sample),
         jnp.array(
             [
                 5.3265953,
@@ -252,15 +252,15 @@ def test_distribution_as_sampler():
         ),
     )
     assert jnp.allclose(
-        vmap(10)(Flip(0.5).sample),
+        vmap(10)(flip(0.5).sample),
         jnp.array([1, 1, 1, 0, 1, 1, 0, 1, 1, 0]),
     )
     assert jnp.allclose(
-        vmap(10)(Categorical(logits=jnp.array([1.1, -1.0, 0.9])).sample),
+        vmap(10)(categorical(logits=jnp.array([1.1, -1.0, 0.9])).sample),
         jnp.array([0, 0, 2, 2, 0, 1, 0, 0, 0, 0]),
     )
     assert jnp.allclose(
-        vmap(10)(MvNormalDiag(jnp.array([1.0, 10.0, 100.0]), 0.1 * jnp.ones(3)).sample),
+        vmap(10)(mv_normal_diag(jnp.array([1.0, 10.0, 100.0]), 0.1 * jnp.ones(3)).sample),
         jnp.array(
             [
                 [1.0678201, 9.900013, 100.02386],
@@ -279,7 +279,7 @@ def test_distribution_as_sampler():
 
 
 def test_mixture():
-    m = Mixture(Categorical(probs=[0.3, 0.7]), [Normal(0.0, 1.0), Normal(10.0, 1.0)])
+    m = mixture(categorical(probs=[0.3, 0.7]), [normal(0.0, 1.0), normal(10.0, 1.0)])
     ys = jax.vmap(m.sample)(jax.random.split(key0, 10))
     assert jnp.allclose(
         ys,
@@ -306,7 +306,7 @@ def test_cond_model():
     assert jnp.allclose(tr["retval"], jnp.array(99.979416))
     tr = model2(b / 2).simulate(key0)
     assert jnp.allclose(tr["retval"], jnp.array(50.836914))
-    c = Cond(model1(b), model2(b / 2.0))
+    c = cond(model1(b), model2(b / 2.0))
     tr = c(0).simulate(key0)
     assert jnp.allclose(tr["retval"], jnp.array(50.836914))
     tr = c(1).simulate(key0)
@@ -334,8 +334,8 @@ def test_cond_model():
 
     @gen
     def cond_model(b):
-        flip = Flip(0.5) @ "flip"
-        return c(flip) @ "c"
+        f= flip(0.5) @ "flip"
+        return c(f) @ "c"
 
     tr = cond_model(b).simulate(key0)
     assert jnp.allclose(
@@ -360,7 +360,7 @@ def test_vmap_over_cond():
 def test_ordinary_cond():
     @gen
     def f():
-        n = Normal(0.0, 1.0) @ "n"
+        n = normal(0.0, 1.0) @ "n"
         return jax.lax.cond(n > 0, lambda: n, lambda: 10 * n)
 
     tr = f().simulate(key0)
@@ -371,8 +371,8 @@ def test_ordinary_cond():
 def test_cond_of_two_distributions():
     @gen
     def m():
-        f = Flip(0.5) @ "f"
-        p = Cond(Normal(10.0, 0.1), Normal(1.0, 0.1))(f) @ "p"
+        f = flip(0.5) @ "f"
+        p = cond(normal(10.0, 0.1), normal(1.0, 0.1))(f) @ "p"
         return f, p
 
     tr = m().simulate(key0)
@@ -383,7 +383,7 @@ def test_cond_of_two_distributions():
 def test_intervening_functions():
     @gen
     def h():
-        return Normal(0.0, 1.0) @ "n"
+        return normal(0.0, 1.0) @ "n"
 
     def g():
         return h()
@@ -400,7 +400,7 @@ def test_intervening_functions():
 class TestScan:
     @gen
     def update(state, delta):
-        drift = Normal(delta, 0.01) @ "drift"
+        drift = normal(delta, 0.01) @ "drift"
         new_position = state + drift
         return new_position, new_position
 
@@ -470,7 +470,7 @@ class TestScan:
 def test_plain_scan():
     @gen
     def model(x):
-        init = Normal(x, 0.01) @ "init"
+        init = normal(x, 0.01) @ "init"
         return jax.lax.scan(lambda a, b: (a + b, a + b), init, jnp.arange(5.0))
 
     tr = model(10.0).simulate(key0)
@@ -485,7 +485,7 @@ def test_plain_scan():
 def test_scan_map():
     @gen
     def model(step, update):
-        return step + Normal(0.0, update) @ "s"
+        return step + normal(0.0, update) @ "s"
 
     def diag(r):
         return r + 1.0, r
@@ -548,8 +548,8 @@ class TestCurve:
         @gen
         def model(xs):
             poly = quadratic() @ "p"
-            p_outlier = Uniform(0.0, 1.0) @ "p_outlier"
-            sigma_inlier = Uniform(0.0, 0.3) @ "sigma_inlier"
+            p_outlier = uniform(0.0, 1.0) @ "p_outlier"
+            sigma_inlier = uniform(0.0, 0.3) @ "sigma_inlier"
             return (
                 curve_model.vmap(in_axes=(None, 0, None, None))(
                     poly, xs, p_outlier, sigma_inlier
@@ -605,7 +605,7 @@ class TestCurve:
 def test_map_map():
     @gen
     def noisy(x):
-        return Normal(x, 0.01) @ "x"
+        return normal(x, 0.01) @ "x"
 
     m = noisy.map(lambda x: 2.0 * x).map(lambda x: 10.0 + x)
 
@@ -622,7 +622,7 @@ def test_map_map():
 def test_map_vmap():
     @gen
     def noisy(x):
-        return Normal(x, 0.01) @ "x"
+        return normal(x, 0.01) @ "x"
 
     def plus5(x):
         return x + 5.0
@@ -635,7 +635,7 @@ def test_map_vmap():
 def test_map():
     @gen
     def noisy(x):
-        return Normal(x, 0.01) @ "x"
+        return normal(x, 0.01) @ "x"
 
     def plus5(x):
         return x + 5.0
@@ -663,7 +663,7 @@ def test_simple_repeat():
 def test_repeat_in_model():
     @gen
     def x(y):
-        return Normal(2.0 * y, 1.0) @ "x"
+        return normal(2.0 * y, 1.0) @ "x"
 
     @gen
     def xs():
@@ -678,7 +678,7 @@ def test_repeat_in_model():
 def test_repeat_of_repeat():
     @gen
     def y(x):
-        return Normal(2.0 * x + 1, 0.1) @ "y"
+        return normal(2.0 * x + 1, 0.1) @ "y"
 
     tr = y.repeat(4).repeat(3)(5.0).simulate(key0)
     assert jnp.allclose(
@@ -698,7 +698,7 @@ def test_shaped_distribution():
     def f(x):
         lows = x + jnp.arange(4.0)
         highs = lows + 1
-        y = Uniform(lows, highs) @ "y"
+        y = uniform(lows, highs) @ "y"
         print(f"y {y}")
         return y
 
@@ -733,7 +733,7 @@ def test_shaped_distribution():
 def test_map_in_model():
     @gen
     def x(y):
-        return Normal(y, 0.1) @ "x"
+        return normal(y, 0.1) @ "x"
 
     @gen
     def mx():
@@ -748,7 +748,7 @@ def test_map_in_model():
 def test_map_of_repeat():
     @gen
     def coefficient():
-        return Normal(0.0, 1.0) @ "c"
+        return normal(0.0, 1.0) @ "c"
 
     pg = coefficient.repeat(3).map(Poly)
 
@@ -767,7 +767,7 @@ def test_map_of_repeat():
 def test_repeat_of_map():
     @gen
     def y(x):
-        return Normal(x, 0.1) @ "y"
+        return normal(x, 0.1) @ "y"
 
     mr = y.map(lambda x: x + 13.0).repeat(5)(7.0)
 
@@ -788,7 +788,7 @@ def test_repeat_of_cond():
 def test_vmap():
     @gen
     def model(x, y):
-        return x + Normal(y, 0.01) @ "a"
+        return x + normal(y, 0.01) @ "a"
 
     tr = model(5.0, 1.0).simulate(key0)
     assert tr["retval"] == 5.9979415
@@ -821,7 +821,7 @@ def test_vmap():
 def test_vmap_of_vmap():
     @gen
     def model(x, y):
-        return Normal(x, y) @ "n"
+        return normal(x, y) @ "n"
 
     tr = (
         model.vmap(in_axes=(0, None))
@@ -848,7 +848,7 @@ def test_vmap_of_vmap():
 def test_repeat_of_vmap_of_vmap():
     @gen
     def model(x, y):
-        return Normal(x, y) @ "n"
+        return normal(x, y) @ "n"
 
     tr = (
         model.vmap(in_axes=(0, None))
@@ -888,8 +888,8 @@ def test_repeat_of_vmap_of_vmap():
 def test_assess():
     @gen
     def p():
-        x = Normal(0.0, 1.0) @ "x"
-        y = Normal(0.0, 1.0) @ "y"
+        x = normal(0.0, 1.0) @ "x"
+        y = normal(0.0, 1.0) @ "y"
         return x, y
 
     @gen
@@ -915,7 +915,7 @@ def test_assess():
 def test_assess_vmap1():
     @gen
     def p(a):
-        return Normal(a, 0.01) @ "x"
+        return normal(a, 0.01) @ "x"
 
     w, retval = p.vmap()(jnp.arange(5.0)).assess({"x": jnp.arange(5.0) + 0.2})
     assert w == pytest.approx(-981.56934)
@@ -924,8 +924,8 @@ def test_assess_vmap1():
 def test_assess_vmap():
     @gen
     def p(a, b):
-        x = Normal(a, 1.0) @ "x"
-        y = Normal(b, 1.0) @ "y"
+        x = normal(a, 1.0) @ "x"
+        y = normal(b, 1.0) @ "y"
         return x, y
 
     model = p.vmap()(jnp.arange(5.0), 10.0 + jnp.arange(5.0))
@@ -938,7 +938,7 @@ def test_assess_vmap():
 def test_assess_repeat():
     @gen
     def m(a):
-        return Normal(a, 1.0) @ "x"
+        return normal(a, 1.0) @ "x"
 
     w, _ = m.repeat(4)(10.0).assess({"x": 10.0 + 0.1 * jnp.ones(4)})
     assert w == -3.6957543
@@ -947,8 +947,8 @@ def test_assess_repeat():
 def test_bernoulli():
     @gen
     def p():
-        b = Bernoulli(probs=0.01) @ "b"
-        c = Bernoulli(logits=-1.0) @ "c"
+        b = bernoulli(probs=0.01) @ "b"
+        c = bernoulli(logits=-1.0) @ "c"
         return b, c
 
     tr = p().simulate(key0)
@@ -959,25 +959,25 @@ def test_bernoulli():
     )
 
     with pytest.raises(ValueError):
-        Bernoulli()
+        bernoulli()
 
     with pytest.raises(TypeError):
-        Bernoulli(0.1)  # type: ignore
+        bernoulli(0.1)  # type: ignore
 
     with pytest.raises(ValueError):
-        Bernoulli(logits=-1, probs=0.5)
+        bernoulli(logits=-1, probs=0.5)
 
 
 def test_importance():
     @gen
     def model():
-        a = Normal(0.0, 1.0) @ "a"
-        b = Normal(0.0, 0.1) @ "b"
+        a = normal(0.0, 1.0) @ "a"
+        b = normal(0.0, 0.1) @ "b"
         return a, b
 
     @gen
     def outer():
-        c = Normal(0.0, 1.0) @ "c"
+        c = normal(0.0, 1.0) @ "c"
         a, b = model() @ "d"
         return a + b + c
 
@@ -998,8 +998,8 @@ def test_importance():
 def test_repeat_importance():
     @gen
     def model(z):
-        a = Normal(z, 0.1) @ "a"
-        b = Normal(z, 1.0) @ "b"
+        a = normal(z, 0.1) @ "a"
+        b = normal(z, 1.0) @ "b"
         return a + b
 
     mr = model.repeat(4)(1.0)
@@ -1014,8 +1014,8 @@ def test_repeat_importance():
 def test_vmap_importance():
     @gen
     def model(x, y):
-        a = Normal(x, 0.1) @ "a"
-        b = Normal(y, 0.2) @ "b"
+        a = normal(x, 0.1) @ "a"
+        b = normal(y, 0.2) @ "b"
         return a + b
 
     values = jnp.arange(5.0)
@@ -1035,7 +1035,7 @@ def test_vmap_importance():
 def test_partial():
     @gen
     def model(x, y):
-        return Normal(x, y) @ "x"
+        return normal(x, y) @ "x"
 
     tr = model.partial(10.0)(0.01).simulate(key0)
     assert tr["retval"] == 9.997942
@@ -1048,8 +1048,8 @@ def test_categorial_jaxpr():
 
     @gen
     def model(key):
-        logits = Normal(jnp.zeros(5), jnp.ones(5)) @ "logits"
-        return jax.vmap(Categorical(logits=logits).sample)(jax.random.split(key, N))
+        logits = normal(jnp.zeros(5), jnp.ones(5)) @ "logits"
+        return jax.vmap(categorical(logits=logits).sample)(jax.random.split(key, N))
 
     key, k1, k2 = jax.random.split(key0, 3)
     m = model(k1).simulate(k2)
@@ -1057,26 +1057,26 @@ def test_categorial_jaxpr():
     # this is basically a stub, since we may want to experiment with
     # a new kind of primitive for sampling outside of a generative function
     # that does not expand to machine code under vmap. The problem is that
-    # if someone does their own vmap over Categorical, vmap passes over the
+    # if someone does their own vmap over categorical, vmap passes over the
     # primitive boundary, since the distribution isn't being used generatively.
 
 
 def test_gen_paper_update():
     @gen
     def inner1(val):
-        return jnp.logical_and(Bernoulli(probs=0.6) @ "c", val)
+        return jnp.logical_and(bernoulli(probs=0.6) @ "c", val)
 
     @gen
     def inner2(val):
-        # was d, but the restrictions around Cond are strict.
+        # was d, but the restrictions around cond are strict.
         # the branches have to generate data with the same
-        return jnp.logical_and(Bernoulli(probs=0.1) @ "c", val)
+        return jnp.logical_and(bernoulli(probs=0.1) @ "c", val)
 
     @gen
     def foo():
-        val = Bernoulli(probs=0.3) @ "a"
-        val = Cond(inner1(val), inner2(val))(Bernoulli(probs=0.4) @ "b") @ "x"
-        val = jnp.logical_and(Bernoulli(probs=0.7) @ "e", val)
+        val = bernoulli(probs=0.3) @ "a"
+        val = cond(inner1(val), inner2(val))(bernoulli(probs=0.4) @ "b") @ "x"
+        val = jnp.logical_and(bernoulli(probs=0.7) @ "e", val)
         return val
 
     # roll the dice until we get the configuration illustrated in figure 3 of the paper

@@ -33,17 +33,20 @@
 # Dependencies are specified in pyproject.toml.
 # %%
 # Global includes
+# pyright: reportWildcardImportFromLibrary=false
+# ruff: noqa: F405
 
 import json
 import genstudio.plot as Plot
 import jax
 import jax.numpy as jnp
-import minigenjax as mg
-from jaxtyping import Array, ArrayLike, PRNGKeyArray
+from minigenjax import *  # noqa: F403
+from jaxtyping import Array, PRNGKeyArray
 from typing import TypeVar, Generic, Callable
 from genstudio.plot import js
 
 html = Plot.Hiccup
+
 
 # %% [markdown]
 # ## Sensing a robot's location on a map
@@ -180,7 +183,7 @@ clutters_plot = (
 
 
 # %%
-@mg.pytree
+@pytree
 class Pose:
     p: Array
     hd: Array
@@ -524,10 +527,10 @@ Plot.Frames(
 model_sensor_noise = 0.1
 
 
-@mg.Gen
+@gen
 def sensor_model_one(pose, angle, sensor_noise):
     return (
-        mg.Normal(
+        normal(
             sensor_distance(
                 pose.rotate(angle), world["walls"], sensor_settings["box_size"]
             ),
@@ -844,9 +847,9 @@ def on_target_pose_chage(widget, _):
 # (This is just a recapitulation of `random_pose` from above.)
 
 
-@mg.Gen
+@gen
 def uniform_pose(mins, maxes):
-    p_array = mg.Uniform(mins, maxes) @ "p_array"
+    p_array = uniform(mins, maxes) @ "p_array"
     return Pose(p_array[0:2], p_array[2])
 
 
@@ -869,16 +872,16 @@ some_poses
 # %%
 # Even mixture of uniform priors over two rooms.
 
-room1 = mg.Uniform(
+room1 = uniform(
     jnp.array([12.83, 11.19, -jnp.pi]), jnp.array([15.81, 15.26, jnp.pi])
 )
-room2 = mg.Uniform(jnp.array([15.73, 5.79, -jnp.pi]), jnp.array([18.90, 9.57, +jnp.pi]))
+room2 = uniform(jnp.array([15.73, 5.79, -jnp.pi]), jnp.array([18.90, 9.57, +jnp.pi]))
 
 
-@mg.Gen
+@gen
 def two_room_prior():
-    i = mg.Flip(0.5) @ "f"
-    x, y, hd = mg.Cond(room1, room2)(i) @ "p"
+    i = flip(0.5) @ "f"
+    x, y, hd = cond(room1, room2)(i) @ "p"
     return Pose(jnp.array([x, y]), hd)
 
 
@@ -902,15 +905,15 @@ pose_for_localized_prior = Pose(jnp.array([2.0, 16.0]), jnp.array(0.0))
 spread_of_localized_prior = (0.1, 0.75)
 
 
-@mg.Gen
+@gen
 def localized_prior():
     p = (
-        mg.MvNormalDiag(
+        mv_normal_diag(
             pose_for_localized_prior.p, spread_of_localized_prior[0] * jnp.ones(2)
         )
         @ "p"
     )
-    hd = mg.Normal(pose_for_localized_prior.hd, spread_of_localized_prior[1]) @ "hd"
+    hd = normal(pose_for_localized_prior.hd, spread_of_localized_prior[1]) @ "hd"
     return Pose(p, hd)
 
 
@@ -940,7 +943,7 @@ model_dispatch = {
 def make_posterior_density_fn(prior_label, readings, model_noise):
     prior, cm_builder = model_dispatch[prior_label]
 
-    @mg.Gen
+    @gen
     def joint_model():
         pose = prior @ "pose"
         _ = sensor_model(pose, sensor_angles, model_noise) @ "sensor"
@@ -1168,7 +1171,7 @@ def grid_approximation_handler(widget, k, readings):
     # TODO(colin): there is a more efficient way of doing this; sample all the
     # indices and then project the grid_poses down
     def grid_sample_one(k):
-        return grid_poses[mg.Categorical(logits=posterior_densities).sample(k)]
+        return grid_poses[categorical(logits=posterior_densities).sample(k)]
 
     grid_samples = jax.vmap(grid_sample_one)(jax.random.split(k, N_samples))
     widget.state.update(
@@ -1216,7 +1219,7 @@ def importance_resampling_handler(widget, k, readings):
         k1, k2 = jax.random.split(k)
         presamples = jax.vmap(random_pose)(jax.random.split(k1, N_presamples))
         posterior_densities = jax.vmap(jitted_posterior)(presamples)
-        return presamples[mg.Categorical(logits=posterior_densities).sample(k2)]
+        return presamples[categorical(logits=posterior_densities).sample(k2)]
 
     grid_samples = jax.vmap(importance_resample_one)(jax.random.split(k, N_samples))
     widget.state.update(
@@ -1265,7 +1268,7 @@ def MCMC_handler(widget, k, readings):
         new_p_hd = jax.random.uniform(k1, shape=(3,), minval=mins, maxval=maxs)
         new_pose = Pose(new_p_hd[0:2], new_p_hd[2])
         new_posterior = jitted_posterior(new_pose)
-        accept = jnp.log(mg.Uniform().sample(k2)) <= new_posterior - posterior_density
+        accept = jnp.log(uniform().sample(k2)) <= new_posterior - posterior_density
         return (
             jax.tree.map(
                 lambda x, y: jnp.where(accept, x, y),
@@ -1312,7 +1315,7 @@ camera_widget(
 
 
 # %%
-@mg.pytree
+@pytree
 class Control:
     ds: Array
     dhd: Array
@@ -1544,15 +1547,15 @@ def update_physical_path(widget, _):
 #
 # The following models attempting to step (constrained by the walls) towards a point with some uncertainty about it.
 # %%
-@mg.Gen
+@gen
 def step_model(motion_settings, start, control):
     p = (
-        mg.MvNormalDiag(
+        mv_normal_diag(
             start.p + control.ds * start.dp(), motion_settings["p_noise"] * jnp.ones(2)
         )
         @ "p"
     )
-    hd = mg.Normal(start.hd + control.dhd, motion_settings["hd_noise"]) @ "hd"
+    hd = normal(start.hd + control.dhd, motion_settings["hd_noise"]) @ "hd"
     return physical_step(start.p, p, hd)
 
 
@@ -1661,9 +1664,9 @@ def update_confidence_circle(widget, _):
 
 # %%
 def path_model(motion_settings):
-    @mg.Gen
+    @gen
     def path_model_inner():
-        @mg.Gen
+        @gen
         def step(start, control):
             s = step_model(motion_settings, start, control) @ "step"
             return s, s
@@ -1678,7 +1681,6 @@ def path_model(motion_settings):
 
 # %%
 key, sub_key = jax.random.split(key)
-# path_model(model_motion_settings).propose(sub_key)
 path_model(model_motion_settings).propose(sub_key)
 # %%
 
@@ -1741,7 +1743,7 @@ Plot.html(
 
 
 # %%
-@mg.Gen
+@gen
 def full_model_kernel(motion_settings, sensor_noise, state, control):
     pose = step_model(motion_settings, state, control) @ "pose"
     sensor_model(pose, sensor_angles, sensor_noise) @ "sensor"
@@ -1749,7 +1751,7 @@ def full_model_kernel(motion_settings, sensor_noise, state, control):
 
 
 def full_model_factory(motion_settings, sensor_noise):
-    @mg.Gen
+    @gen
     def full_model():
         return (
             full_model_kernel.partial(motion_settings, sensor_noise)
@@ -1825,9 +1827,9 @@ trace
 # For starters, the trace contains all the information from `propose`.
 
 # %%
-mg.to_constraint(trace)
+to_constraint(trace)
 # %%
-mg.to_score(trace)
+to_score(trace)
 
 # %%
 trace["retval"]
@@ -1853,9 +1855,9 @@ trace["retval"]
 # Minigenjax doesn't have selections, but it's possible to achieve the desired effect in
 # this case by running to_score on subtrees of the trace.
 
-project_p = mg.to_score(trace["subtraces"]["p"])
-project_hd = mg.to_score(trace["subtraces"]["hd"])
-assert mg.to_score(trace) == project_p + project_hd
+project_p = to_score(trace["subtraces"]["p"])
+project_hd = to_score(trace["subtraces"]["hd"])
+assert to_score(trace) == project_p + project_hd
 
 
 # %% [markdown]
@@ -1931,7 +1933,7 @@ def get_path(trace):
 
 
 def get_sensors(trace):
-    return mg.to_constraint(trace)["steps"]["sensor"]["distance"]
+    return to_constraint(trace)["steps"]["sensor"]["distance"]
 
 
 def animate_full_trace(trace, frame_key=None):
@@ -2123,7 +2125,7 @@ trace_high, log_weight_high = high_deviation_model.importance(
 # %%
 key, sub_key = jax.random.split(key)
 # log_weight_high - trace_high.project(sub_key, S["steps", "sensor", "distance"])
-log_weight_high - mg.to_score(
+log_weight_high - to_score(
     trace_high["subtraces"]["steps"]["subtraces"]["sensor"]["subtraces"]["distance"]
 )
 
@@ -2212,7 +2214,7 @@ traces_simulated = jax.vmap(full_model.simulate)(
     jax.random.split(k3, N_samples),
 )
 simulated_weights = jax.vmap(
-    lambda trace, k: mg.to_score(
+    lambda trace, k: to_score(
         trace["subtraces"]["steps"]["subtraces"]["sensor"]["subtraces"]["distance"]
     )  # trace.project(k, S["steps", "sensor", "distance"])
 )(traces_simulated, jax.random.split(k4, N_samples))
@@ -2312,7 +2314,7 @@ simulated_weights = jax.vmap(
 # %%
 def importance_resample_unjitted(
     key: PRNGKeyArray,
-    constraints: mg.Constraint,
+    constraints: dict,
     motion_settings,
     sensor_noise,
     N: int,
@@ -2326,7 +2328,7 @@ def importance_resample_unjitted(
     samples, log_weights = jax.vmap(full_model.importance, in_axes=(0, None))(
         jax.random.split(key1, N * K), constraints
     )
-    winners = jax.vmap(lambda key, weights: mg.Categorical(logits=weights).sample(key))(
+    winners = jax.vmap(lambda key, weights: categorical(logits=weights).sample(key))(
         jax.random.split(key2, K), (jnp.reshape(log_weights, (K, N)),)
     )
     winners = jnp.squeeze(
@@ -2574,7 +2576,7 @@ class SISwithRejuvenation(Generic[StateT, ControlT]):
                 self.importance, in_axes=(0, 0, None, None)
             )(ks[0], particles, control, observation)
             indices = jax.vmap(
-                mg.Categorical(logits=log_weights + log_weight_increments).sample
+                categorical(logits=log_weights + log_weight_increments).sample
             )(
                 ks[1],
             )
@@ -2676,7 +2678,7 @@ def run_SMCP3_step(fwd_proposal, bwd_proposal, key, sample, proposal_args):
 # and returns an importance-resampled member.
 # The joint density (= the density from the full model) serves as
 # the unnormalized posterior density over steps.
-@mg.Gen
+@gen
 def grid_fwd_proposal(sample, args):
     base_grid, observation, full_model_args = args
     observation_cm = {"sensor": {"distance": observation}}
@@ -2689,7 +2691,7 @@ def grid_fwd_proposal(sample, args):
             }
         )[0]
     )(*base_grid)
-    fwd_index = mg.Categorical(logits=log_weights) @ "fwd_index"
+    fwd_index = categorical(logits=log_weights) @ "fwd_index"
 
     return (
         (
@@ -2701,7 +2703,7 @@ def grid_fwd_proposal(sample, args):
 
 
 # Backwards proposal simply guesses according to the prior over steps, nothing fancier.
-@mg.Gen
+@gen
 def grid_bwd_proposal(new_sample, args):
     base_grid, _, full_model_args = args
     step_model_args = (full_model_args[0], full_model_args[2], full_model_args[3])

@@ -1,3 +1,4 @@
+# pyright: reportWildcardImportFromLibrary=false
 import pytest
 import jax.random
 import jax.numpy as jnp
@@ -21,8 +22,8 @@ def test_simulate_with_no_choices():
 def test_simple_normal_simulate():
     @gen
     def simple_normal():
-        y1 = Normal(0.0, 1.0) @ "y1"
-        y2 = Normal(0.0, 1.0) @ "y2"
+        y1 = normal(0.0, 1.0) @ "y1"
+        y2 = normal(0.0, 1.0) @ "y2"
         return y1 + y2
 
     key = jax.random.key(314159)
@@ -30,8 +31,8 @@ def test_simple_normal_simulate():
     key, sub_key = jax.random.split(key)
     tr = fn(sub_key)
     choices = to_constraint(tr)
-    score1 = Normal(0.0, 1.0).logpdf(choices["y1"])
-    score2 = Normal(0.0, 1.0).logpdf(choices["y2"])
+    score1 = normal(0.0, 1.0).logpdf(choices["y1"])
+    score2 = normal(0.0, 1.0).logpdf(choices["y2"])
     test_score = score1 + score2
     assert to_score(tr) == pytest.approx(test_score)
 
@@ -39,8 +40,8 @@ def test_simple_normal_simulate():
 def test_simple_normal_multiple_returns():
     @gen
     def simple_normal_multiple_returns():
-        y1 = Normal(0.0, 1.0) @ "y1"
-        y2 = Normal(0.0, 1.0) @ "y2"
+        y1 = normal(0.0, 1.0) @ "y1"
+        y2 = normal(0.0, 1.0) @ "y2"
         return y1, y2
 
     key = jax.random.key(314159)
@@ -53,8 +54,8 @@ def test_simple_normal_multiple_returns():
     y1, y2 = tr["retval"]
     assert y1 == y1_
     assert y2 == y2_
-    score1 = Normal(0.0, 1.0).logpdf(y1)
-    score2 = Normal(0.0, 1.0).logpdf(y2)
+    score1 = normal(0.0, 1.0).logpdf(y1)
+    score2 = normal(0.0, 1.0).logpdf(y2)
     test_score = score1 + score2
     assert to_score(tr) == pytest.approx(test_score)
 
@@ -62,8 +63,8 @@ def test_simple_normal_multiple_returns():
 def test_hierarchical_simple_normal_multiple_returns():
     @gen
     def _submodel():
-        y1 = Normal(0.0, 1.0) @ "y1"
-        y2 = Normal(0.0, 1.0) @ "y2"
+        y1 = normal(0.0, 1.0) @ "y1"
+        y2 = normal(0.0, 1.0) @ "y2"
         return y1, y2
 
     @gen
@@ -81,8 +82,8 @@ def test_hierarchical_simple_normal_multiple_returns():
     y1, y2 = tr["retval"]
     assert y1 == y1_
     assert y2 == y2_
-    score1 = Normal(0.0, 1.0).logpdf(y1)
-    score2 = Normal(0.0, 1.0).logpdf(y2)
+    score1 = normal(0.0, 1.0).logpdf(y1)
+    score2 = normal(0.0, 1.0).logpdf(y2)
     test_score = score1 + score2
     assert to_score(tr) == pytest.approx(test_score)
 
@@ -105,8 +106,8 @@ def test_assess_with_no_choices():
 def test_simple_normal_assess():
     @gen
     def simple_normal():
-        y1 = Normal(0.0, 1.0) @ "y1"
-        y2 = Normal(0.0, 1.0) @ "y2"
+        y1 = normal(0.0, 1.0) @ "y1"
+        y2 = normal(0.0, 1.0) @ "y2"
         return y1 + y2
 
     key = jax.random.key(314159)
@@ -121,8 +122,8 @@ def test_simple_normal_assess():
 def test_assess_missing_address():
     @gen
     def model():
-        y1 = Normal(0.0, 1.0) @ "y1"
-        y2 = Normal(0.0, 1.0) @ "y2"
+        y1 = normal(0.0, 1.0) @ "y1"
+        y2 = normal(0.0, 1.0) @ "y2"
         return y1 + y2
 
     with pytest.raises(MissingConstraint) as exc:
@@ -141,8 +142,8 @@ class TestStaticGenFnUpdate:
     def test_simple_normal_update(self):
         @gen
         def simple_normal():
-            y1 = Normal(0.0, 1.0) @ "y1"
-            y2 = Normal(0.0, 1.0) @ "y2"
+            y1 = normal(0.0, 1.0) @ "y1"
+            y2 = normal(0.0, 1.0) @ "y2"
             return y1 + y2
 
         key = jax.random.key(314159)
@@ -159,8 +160,8 @@ class TestStaticGenFnUpdate:
         updated_choice = to_constraint(updated)
         _y1 = updated_choice["y1"]
         _y2 = updated_choice["y2"]
-        score1 = Normal(0.0, 1.0).logpdf(_y1)
-        score2 = Normal(0.0, 1.0).logpdf(_y2)
+        score1 = normal(0.0, 1.0).logpdf(_y1)
+        score2 = normal(0.0, 1.0).logpdf(_y2)
         test_score = score1 + score2
         # TODO: restore
         # original_choice = to_constraint(tr)
@@ -176,8 +177,8 @@ class TestStaticGenFnUpdate:
         updated_choice = to_constraint(updated)
         y1 = updated_choice["y1"]
         y2 = updated_choice["y2"]
-        score1 = Normal(0.0, 1.0).logpdf(y1)
-        score2 = Normal(0.0, 1.0).logpdf(y2)
+        score1 = normal(0.0, 1.0).logpdf(y1)
+        score2 = normal(0.0, 1.0).logpdf(y2)
         test_score = score1 + score2
         updated_score = to_score(updated)
         assert updated_score == original_score + w
@@ -186,9 +187,9 @@ class TestStaticGenFnUpdate:
     def test_simple_linked_normal_update(self):
         @gen
         def simple_linked_normal():
-            y1 = Normal(0.0, 1.0) @ "y1"
-            y2 = Normal(y1, 1.0) @ "y2"
-            y3 = Normal(y1 + y2, 1.0) @ "y3"
+            y1 = normal(0.0, 1.0) @ "y1"
+            y2 = normal(y1, 1.0) @ "y2"
+            y3 = normal(y1 + y2, 1.0) @ "y3"
             return y1 + y2 + y3
 
         key = jax.random.key(314159)
@@ -206,9 +207,9 @@ class TestStaticGenFnUpdate:
         y1 = updated_choice["y1"]
         y2 = updated_choice["y2"]
         y3 = updated_choice["y3"]
-        score1, _ = Normal(0.0, 1.0).assess(y1)
-        score2, _ = Normal(y1, 1.0).assess(y2)
-        score3, _ = Normal(y1 + y2, 1.0).assess(y3)
+        score1, _ = normal(0.0, 1.0).assess(y1)
+        score2, _ = normal(y1, 1.0).assess(y2)
+        score3, _ = normal(y1 + y2, 1.0).assess(y3)
         test_score = score1 + score2 + score3
         # TODO restore
         # assert original_choice["y1"] == discard["y1"]
@@ -218,12 +219,12 @@ class TestStaticGenFnUpdate:
     def test_simple_hierarchical_normal(self):
         @gen
         def _inner(x):
-            y1 = Normal(x, 1.0) @ "y1"
+            y1 = normal(x, 1.0) @ "y1"
             return y1
 
         @gen
         def simple_hierarchical_normal():
-            y1 = Normal(0.0, 1.0) @ "y1"
+            y1 = normal(0.0, 1.0) @ "y1"
             y2 = _inner(y1) @ "y2"
             y3 = _inner(y1 + y2) @ "y3"
             return y1 + y2 + y3
@@ -248,9 +249,9 @@ class TestStaticGenFnUpdate:
         assert y1 == new["y1"]
         assert y2 == original_choice["y2"]["y1"]
         assert y3 == original_choice["y3"]["y1"]
-        score1, _ = Normal(0.0, 1.0).assess(y1)
-        score2, _ = Normal(y1, 1.0).assess(y2)
-        score3, _ = Normal(y1 + y2, 1.0).assess(y3)
+        score1, _ = normal(0.0, 1.0).assess(y1)
+        score2, _ = normal(y1, 1.0).assess(y2)
+        score3, _ = normal(y1 + y2, 1.0).assess(y3)
         test_score = score1 + score2 + score3
         # TODO : restore
         # assert original_choice["y1"] == discard["y1"]
@@ -280,11 +281,11 @@ class TestStaticGenFnUpdate:
         updated_sample = to_constraint(updated)
         assert updated_sample["y1"] == new_y1
 
-        δ_y3 = Normal(new_y1 + old_y2, 1.0).logpdf(old_y3) - Normal(
+        δ_y3 = normal(new_y1 + old_y2, 1.0).logpdf(old_y3) - normal(
             old_y1 + old_y2, 1.0
         ).logpdf(old_y3)
-        δ_y2 = Normal(new_y1, 1.0).logpdf(old_y2) - Normal(old_y1, 1.0).logpdf(old_y2)
-        δ_y1 = Normal(0.0, 1.0).logpdf(new_y1) - Normal(0.0, 1.0).logpdf(old_y1)
+        δ_y2 = normal(new_y1, 1.0).logpdf(old_y2) - normal(old_y1, 1.0).logpdf(old_y2)
+        δ_y1 = normal(0.0, 1.0).logpdf(new_y1) - normal(0.0, 1.0).logpdf(old_y1)
         assert w == pytest.approx((δ_y3 + δ_y2 + δ_y1))
 
         # TestStaticGenFn composition of update calls.
@@ -295,7 +296,7 @@ class TestStaticGenFnUpdate:
         updated = jitted(sub_key, new, updated)
         w = to_weight(updated)
         assert updated["subtraces"]["y3"]["retval"] == 2.0
-        correct_w = Normal(new_y1 + old_y2, 1.0).logpdf(new_y3) - Normal(
+        correct_w = normal(new_y1 + old_y2, 1.0).logpdf(new_y3) - normal(
             new_y1 + old_y2, 1.0
         ).logpdf(old_y3)
         assert w == pytest.approx(correct_w, 0.0001)
@@ -303,9 +304,9 @@ class TestStaticGenFnUpdate:
     def test_update_weight_correctness(self):
         @gen
         def simple_linked_normal():
-            y1 = Normal(0.0, 1.0) @ "y1"
-            y2 = Normal(y1, 1.0) @ "y2"
-            y3 = Normal(y1 + y2, 1.0) @ "y3"
+            y1 = normal(0.0, 1.0) @ "y1"
+            y2 = normal(y1, 1.0) @ "y2"
+            y3 = normal(y1 + y2, 1.0) @ "y3"
             return y1 + y2 + y3
 
         # easy case
@@ -313,9 +314,9 @@ class TestStaticGenFnUpdate:
 
         @gen
         def curried_linked_normal(v1, v2, v3):
-            y1 = Normal(0.0, v1) @ "y1"
-            y2 = Normal(y1, v2) @ "y2"
-            y3 = Normal(y1 + y2, v3) @ "y3"
+            y1 = normal(0.0, v1) @ "y1"
+            y2 = normal(y1, v2) @ "y2"
+            y3 = normal(y1 + y2, v3) @ "y3"
             return y1 + y2 + y3
 
         # curry
@@ -335,9 +336,9 @@ class TestStaticGenFnUpdate:
 
             @gen
             def run(self, v3):
-                y1 = Normal(0.0, self.v1) @ "y1"
-                y2 = Normal(y1, self.v2) @ "y2"
-                y3 = Normal(y1 + y2, v3) @ "y3"
+                y1 = normal(0.0, self.v1) @ "y1"
+                y2 = normal(y1, self.v2) @ "y2"
+                y3 = normal(y1 + y2, v3) @ "y3"
                 return y1 + y2 + y3
 
         # model method
@@ -349,9 +350,9 @@ class TestStaticGenFnUpdate:
 
         @gen
         def m_linked(m: Model, v2, v3):
-            y1 = Normal(0.0, m.v1) @ "y1"
-            y2 = Normal(y1, v2) @ "y2"
-            y3 = Normal(y1 + y2, v3) @ "y3"
+            y1 = normal(0.0, m.v1) @ "y1"
+            y2 = normal(y1, v2) @ "y2"
+            y3 = normal(y1 + y2, v3) @ "y3"
             return y1 + y2 + y3
 
         self.update_weight_correctness_general_assertions(m_linked.partial(m)(1.0, 1.0))
@@ -374,7 +375,7 @@ class TestStaticGenFnUpdate:
 
         @gen
         def simple_linked_normal_with_tree_argument(tree):
-            y1 = Normal(tree.x, tree.y) @ "y1"
+            y1 = normal(tree.x, tree.y) @ "y1"
             return y1
 
         key = jax.random.key(314159)
@@ -412,7 +413,7 @@ class TestScanUpdate:
 
         @gen
         def step(b, a):
-            return Normal(b + a.x, 1e-6) @ "b", None
+            return normal(b + a.x, 1e-6) @ "b", None
 
         @gen
         def model(k):
